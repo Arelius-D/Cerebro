@@ -1,11 +1,11 @@
 #!/bin/bash
-# Cerebro v2.0 - Custom Backup Solution
+# Cerebro v2.1 - Custom Backup Solution
 # Copyright (c) 2026 Arelius-D | MIT License
 set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0" .sh)
 SCRIPT_TITLE="Custom Backup Solution for Files and Folders"
-CODE_VERSION="v2.0"
+CODE_VERSION="v2.1"
 SCRIPT_DIR="${SCRIPT_DIR:-$(dirname "$(realpath "$0")")}"
 SCRIPT_FILE_NAME="$SCRIPT_NAME.sh"
 ASSETS_DIR="$SCRIPT_DIR/assets"
@@ -80,18 +80,17 @@ check_requirements() {
         fi
     done
     if [ $missing -eq 1 ]; then
-        echo "[INFO] Install missing tools? (y/n): "
-        read -r install
+        read -r -p "[INFO] Install missing tools? (y/n): " install
         if [[ "$install" =~ ^[yY] ]]; then
             if ! sudo -n true 2>/dev/null; then
                 echo "[INFO] sudo password required to install tools."
             fi
-            sudo apt update && sudo apt install tar diffutils rsync coreutils findutils grep sed -y || {
+            sudo apt update && sudo apt install gawk tar diffutils rsync coreutils findutils grep sed -y || {
                 echo "[ERROR] Failed to install required tools."
                 exit 1
             }
         else
-            echo "[ERROR] Please install required tools manually: sudo apt install tar diffutils rsync coreutils findutils grep sed -y"
+            echo "[ERROR] Please install required tools manually: sudo apt install gawk tar diffutils rsync coreutils findutils grep sed -y"
             exit 1
         fi
     fi
