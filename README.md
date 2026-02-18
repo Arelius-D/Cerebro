@@ -885,23 +885,6 @@ rclone sync /mnt/nas/backup/cerebro/hostname/ remote:encrypted-backup/
 
 ---
 
-## 15. Roadmap & Future Features
-
-**Planned for v2.1:**
-* Web dashboard for log visualization
-* Slack/Discord webhook notifications
-* Pre/post-backup hook scripts
-* Config validation with warnings
-* Backup integrity testing on schedule
-
-**Under consideration:**
-* Incremental backup mode
-* Built-in encryption
-* Database dump integration (MySQL, PostgreSQL)
-* Windows Subsystem for Linux (WSL) support
-
----
-
 > **Final Note:** Cerebro is built on the premise that **data is useless without context**. By providing deep visibility into *what* changed and *why* a backup occurred, it transforms backups from a "storage chore" into a "system administration asset." 
 
 > **Philosophy:** A backup system should answer three questions:
