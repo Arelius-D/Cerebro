@@ -913,7 +913,6 @@ rclone sync /mnt/nas/backup/cerebro/hostname/ remote:encrypted-backup/
 
 ---
 
-**Questions? Issues? Contributions?**
-[Include your contact/repo link here]
+**Questions? Issues? Contributions?** [https://github.com/Arelius-D/Cerebro](https://github.com/Arelius-D/Cerebro)
 
-**License:** [Include license here]
+**License:** MIT License
