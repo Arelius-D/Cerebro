@@ -1,28 +1,37 @@
 #!/bin/bash
-# Cerebro Installer
 
 INSTALL_DIR="$HOME/cerebro"
 REPO_RAW="https://raw.githubusercontent.com/Arelius-D/Cerebro/main"
 
+download_file() {
+    local url="$1"
+    local dest="$2"
+    
+    if command -v curl >/dev/null 2>&1; then
+        curl -sL "$url" -o "$dest"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$dest" "$url"
+    else
+        echo "❌ Error: Neither curl nor wget found. Please install one."
+        exit 1
+    fi
+}
+
 echo "🧠 Installing Cerebro to $INSTALL_DIR..."
 
-# 1. Create directory
 mkdir -p "$INSTALL_DIR"
 
-# 2. Download Script
 echo "Downloading script..."
-curl -sL "$REPO_RAW/cerebro.sh" -o "$INSTALL_DIR/cerebro.sh"
+download_file "$REPO_RAW/cerebro.sh" "$INSTALL_DIR/cerebro.sh"
 chmod +x "$INSTALL_DIR/cerebro.sh"
 
-# 3. Download Config Template (Only if missing)
 if [ -f "$INSTALL_DIR/cerebro.cfg" ]; then
     echo "ℹ️  Existing configuration found. Skipping config download."
 else
     echo "Downloading default configuration..."
-    curl -sL "$REPO_RAW/cerebro.cfg" -o "$INSTALL_DIR/cerebro.cfg"
+    download_file "$REPO_RAW/cerebro.cfg" "$INSTALL_DIR/cerebro.cfg"
 fi
 
-# 4. Create assets dir
 mkdir -p "$INSTALL_DIR/assets"
 
 echo ""
