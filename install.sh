@@ -35,6 +35,17 @@ fi
 mkdir -p "$INSTALL_DIR/assets"
 
 echo ""
+read -r -p "🔍 Install Recall extension? (optional restore tool) [y/N]: " install_recall
+if [[ "$install_recall" =~ ^[yY]$ ]]; then
+    echo "Downloading recall.sh..."
+    download_file "$REPO_RAW/recall.sh" "$INSTALL_DIR/recall.sh"
+    chmod +x "$INSTALL_DIR/recall.sh"
+    echo "✅ Recall installed. Usage: $INSTALL_DIR/recall.sh <filename>"
+else
+    echo "ℹ️  Recall skipped. You can download it manually later from the repo."
+fi
+
+echo ""
 echo "✅ Installation Complete."
 echo "1. Edit config: nano $INSTALL_DIR/cerebro.cfg"
 echo "2. Run once:    sudo $INSTALL_DIR/cerebro.sh"
