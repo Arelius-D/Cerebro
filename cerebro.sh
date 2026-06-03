@@ -1,11 +1,11 @@
 #!/bin/bash
-# Cerebro v2.9 - Custom Backup Solution
+# Cerebro v3.0 - Custom Backup Solution
 # Copyright (c) 2026 Arelius-D | MIT License
 set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0" .sh)
 SCRIPT_TITLE="Custom Backup Solution for Files and Folders"
-CODE_VERSION="v2.9"
+CODE_VERSION="v3.0"
 SCRIPT_DIR="${SCRIPT_DIR:-$(dirname "$(realpath "$0")")}"
 SCRIPT_FILE_NAME="$SCRIPT_NAME.sh"
 ASSETS_DIR="$SCRIPT_DIR/assets"
@@ -224,50 +224,59 @@ matches_pattern() {
 
 is_destination_responsive() {
     local dest="$1"
+    local conn_timeout="${RSYNC_CONN_TIMEOUT:-10}"
+    local status_file
+    status_file=$(mktemp) || return 1
+    local exit_code=1
 
     (
-        local check_path="$dest"
-        while [ -n "$check_path" ] && [ "$check_path" != "/" ]; do
-            if [ -d "$check_path" ]; then
-                break
+        (
+            local check_path="$dest"
+            while [ -n "$check_path" ] && [ "$check_path" != "/" ]; do
+                if [ -d "$check_path" ]; then
+                    break
+                fi
+                check_path=$(dirname "$check_path")
+            done
+
+            if [ -z "$check_path" ] || [ "$check_path" = "/" ]; then
+                echo 2 >"$status_file"
+                exit 2
             fi
-            check_path=$(dirname "$check_path")
-        done
 
-        if [ -z "$check_path" ] || [ "$check_path" = "/" ]; then
-            exit 2
-        fi
+            if timeout "$conn_timeout" ls -d "$check_path" >/dev/null 2>&1 </dev/null; then
+                echo 0 >"$status_file"
+                exit 0
+            else
+                echo 1 >"$status_file"
+                exit 1
+            fi
+        ) </dev/null >/dev/null 2>&1 &
+    )
 
-        timeout 3 ls -d "$check_path" >/dev/null 2>&1 < /dev/null
-    ) &
-    local test_pid=$!
-
-    local timeout_limit=20
-    local elapsed=0
+    local start_time=$(date +%s)
+    local finished=0
     while :; do
-        local state
-        state=$(ps -p "$test_pid" -o state= 2>/dev/null | tr -d '[:space:]')
-        if [ -z "$state" ] || [ "$state" = "Z" ] || [ "$state" = "X" ]; then
+        if [ -s "$status_file" ]; then
+            finished=1
             break
         fi
-        if [ $elapsed -ge $timeout_limit ]; then
-            kill -9 "$test_pid" >/dev/null 2>&1
-            wait "$test_pid" >/dev/null 2>&1 || true
-            return 1
+        local current_time=$(date +%s)
+        if [ $((current_time - start_time)) -ge "$conn_timeout" ]; then
+            break
         fi
         sleep 0.1
-        ((elapsed++))
     done
 
-    local exit_code=0
-    wait "$test_pid" || exit_code=$?
+    if [ $finished -eq 1 ]; then
+        read -r exit_code <"$status_file"
+    fi
+    rm -f "$status_file"
 
-    if [ $exit_code -eq 124 ]; then
-        return 1
-    elif [ $exit_code -eq 2 ]; then
-        return 1
-    else
+    if [ "$exit_code" -eq 0 ]; then
         return 0
+    else
+        return 1
     fi
 }
 
@@ -547,14 +556,18 @@ run_rsync() {
     local conn_timeout="${RSYNC_CONN_TIMEOUT:-30}"
     local attempt=1
     local rsync_output=""
+    local rsync_success=0
 
     while [ $attempt -le $retries ]; do
         log_message "DEBUG: Attempt $attempt of rsync from $src to $dest"
-        
+
         local status_file
         status_file=$(mktemp) || return 1
         local log_file
-        log_file=$(mktemp) || { rm -f "$status_file"; return 1; }
+        log_file=$(mktemp) || {
+            rm -f "$status_file"
+            return 1
+        }
 
         (
             (
@@ -587,8 +600,8 @@ run_rsync() {
             rm -f "$status_file" "$log_file"
             if [ "$exit_code" -eq 0 ]; then
                 log_message "DEBUG: rsync succeeded on attempt $attempt"
-                echo "$rsync_output"
-                return 0
+                rsync_success=1
+                break
             else
                 log_message "DEBUG: rsync attempt $attempt failed: $rsync_output"
             fi
@@ -602,15 +615,56 @@ run_rsync() {
         ((attempt++))
     done
 
-    log_message "DEBUG: rsync failed after $retries attempts"
-    echo "$rsync_output"
-    return 1
+    if [ $rsync_success -eq 1 ]; then
+        if [ -d "$src" ] || [[ "$src" == */ ]]; then
+            log_message "Synced backups from ${src%/} to ${dest%/} via rsync."
+        else
+            log_message "Backup copied to ${dest%/}/$(basename "$src") via rsync."
+        fi
+        echo "$rsync_output"
+        return 0
+    fi
+
+    local filtered_rsync_output
+    filtered_rsync_output=$(echo "$rsync_output" | grep -i -E 'error|failed|warn|rsync:|close failed' || true)
+    if [ -z "$filtered_rsync_output" ]; then
+        filtered_rsync_output=$(echo "$rsync_output" | tail -n 2)
+    fi
+
+    log_message "WARNING: Failed to transfer from $src to $dest via rsync: $filtered_rsync_output"
+    log_message "Attempting failover copy/sync via cp to $dest..."
+
+    local cp_success=0
+    if [ -d "$src" ] || [[ "$src" == */ ]]; then
+        if cp -ru "$src"/. "$dest"; then
+            cp_success=1
+        fi
+    else
+        if cp -ru "$src" "$dest"; then
+            cp_success=1
+        fi
+    fi
+
+    if [ $cp_success -eq 1 ]; then
+        if [ -d "$src" ] || [[ "$src" == */ ]]; then
+            log_message "Synced backups from ${src%/} to ${dest%/} via failover cp."
+        else
+            log_message "Backup copied to ${dest%/}/$(basename "$src") via failover cp."
+        fi
+        return 0
+    else
+        log_message "ERROR: Failover cp copy/sync from $src to $dest failed."
+        echo "$filtered_rsync_output"
+        return 1
+    fi
 }
 
 sync_destinations() {
     log_message "[Sync Destinations]"
     get_active_destinations
-    
+
+    local conn_timeout="${RSYNC_CONN_TIMEOUT:-10}"
+    local timeout_limit="${RSYNC_TIMEOUT_LIMIT:-300}"
     local valid_dests=()
     for dest in "${active_destinations[@]}"; do
         if is_destination_responsive "$dest"; then
@@ -630,11 +684,21 @@ sync_destinations() {
     local metadata_file="$ASSETS_DIR/.tar_meta_data.txt"
     for dest in "${active_destinations[@]}"; do
         mkdir -p "$dest"
-        local file_count=$(ls "$dest"/*.tar.gz 2>/dev/null | wc -l)
+        local file_count=0
+        for f in "$dest"/*.tar.gz; do
+            if [ -f "$f" ]; then
+                if timeout "$timeout_limit" tar -tzf "$f" >/dev/null 2>&1; then
+                    file_count=$((file_count + 1))
+                else
+                    log_message "WARNING: Backup $f in $dest is corrupt or unreadable. Removing."
+                    rm -f "$f"
+                fi
+            fi
+        done
         if [ $file_count -gt $max_files ]; then
             primary_dest="$dest"
             max_files=$file_count
-            log_message "DEBUG: Selected $primary_dest as primary ($file_count files)"
+            log_message "DEBUG: Selected $primary_dest as primary ($file_count valid files)"
         fi
     done
 
@@ -659,7 +723,6 @@ sync_destinations() {
             mkdir -p "$dest"
             local start_time=$(date +%s)
             if rsync_output=$(run_rsync "$primary_dest/" "$dest/"); then
-                log_message "Synced backups from $primary_dest to $dest via rsync."
                 sync
             else
                 log_message "WARNING: Failed to sync backups to $dest: $rsync_output"
@@ -680,10 +743,12 @@ compare_tars() {
     local latest_backup=""
     local prev_discard_latest=""
     local metadata_file="$ASSETS_DIR/.tar_meta_data.txt"
+    local conn_timeout="${RSYNC_CONN_TIMEOUT:-10}"
+    local timeout_limit="${RSYNC_TIMEOUT_LIMIT:-300}"
 
     log_message "DEBUG: Entering compare_tars for $new_tar"
     get_active_destinations
-    
+
     local valid_dests=()
     for dest in "${active_destinations[@]}"; do
         if is_destination_responsive "$dest"; then
@@ -696,10 +761,16 @@ compare_tars() {
         mkdir -p "$dest"
         local file_count=$(ls "$dest"/*.tar.gz 2>/dev/null | wc -l)
         if [ $file_count -gt 0 ]; then
-            latest_backup=$(ls -t "$dest"/*.tar.gz 2>/dev/null | head -n 1)
-            if [ -n "$latest_backup" ]; then
-                break
-            fi
+            local temp_latest
+            for temp_latest in $(ls -t "$dest"/*.tar.gz 2>/dev/null); do
+                if timeout "$timeout_limit" tar -tzf "$temp_latest" >/dev/null 2>&1; then
+                    latest_backup="$temp_latest"
+                    break 2
+                else
+                    log_message "WARNING: Backup $temp_latest in $dest is corrupt or unreadable. Removing."
+                    rm -f "$temp_latest"
+                fi
+            done
         fi
     done
 
@@ -708,8 +779,13 @@ compare_tars() {
         for dest in "${active_destinations[@]}"; do
             mkdir -p "$dest"
             if [ -f "$dest/$latest_file" ]; then
-                latest_backup="$dest/$latest_file"
-                break
+                if timeout "$timeout_limit" tar -tzf "$dest/$latest_file" >/dev/null 2>&1; then
+                    latest_backup="$dest/$latest_file"
+                    break
+                else
+                    log_message "WARNING: Backup $dest/$latest_file is corrupt or unreadable. Removing."
+                    rm -f "$dest/$latest_file"
+                fi
             fi
         done
     fi
@@ -750,7 +826,7 @@ compare_tars() {
         log_message "DEBUG: Exiting compare_tars (extraction error new_tar)"
         return 1
     fi
-    if ! tar -xzf "$latest_backup" -C "$old_temp_dir" 2>>"$LOG_FILE"; then
+    if ! timeout "$timeout_limit" tar -xzf "$latest_backup" -C "$old_temp_dir" 2>>"$LOG_FILE"; then
         log_message "ERROR: Failed to extract $latest_backup."
         rm -rf "$new_temp_dir" "$old_temp_dir"
         if [ -n "$original_trap" ]; then
@@ -984,7 +1060,6 @@ move_backup() {
         mkdir -p "$dest"
         local start_time=$(date +%s)
         if rsync_output=$(run_rsync "$BACKUP_DIR/$BACKUP_NAME" "$dest/"); then
-            log_message "Backup copied to $dest/$BACKUP_NAME via rsync."
             echo "Backup copied to $dest/$BACKUP_NAME"
             sync
             at_least_one_success=1
@@ -1054,7 +1129,7 @@ old_tar_removal() {
 
     log_message "[Tar Removal]"
     get_active_destinations
-    
+
     local valid_dests=()
     for dest in "${active_destinations[@]}"; do
         if is_destination_responsive "$dest"; then

@@ -1,6 +1,6 @@
 # Cerebro: Intelligent Differential Backup & State Monitoring
 
-> **Version:** v2.9  
+> **Version:** v3.0  
 > **Core Philosophy:** "Read, Understand, Verify."
 
 ## 1. What is Cerebro?
@@ -44,7 +44,7 @@ Cerebro does not assume a single storage location is available.
 Cerebro follows a strict execution pipeline to ensure data integrity:
 
 1.  **Staging:** Creates a temporary, isolated environment in `/tmp` for comparison work.
-2.  **Latest Backup Discovery:** Scans ALL `[DESTINATIONS]` to find the most recent valid backup (by timestamp).
+2.  **Latest Backup Discovery:** Scans ALL `[DESTINATIONS]` to find the most recent valid backup (by timestamp), verifying backup integrity using `timeout tar -tzf` and automatically deleting corrupted archives.
 3.  **Comparison:** Extracts the previous backup and performs a file-by-file diff against live data.
 4.  **Decision Matrix:**
     - _No Change:_ Abort, delete staged tar, log "No changes detected."
@@ -53,7 +53,7 @@ Cerebro follows a strict execution pipeline to ensure data integrity:
 5.  **Tagging & Metadata:** Create entry in `.tar_meta_data.txt` with backup type (LOGDIFF/NOLOG/DISCARD).
 6.  **Creation:** Build the final `tar.gz` archive with all excludes applied.
 7.  **Verification:** Run `tar -tzf` to ensure the archive is not corrupted.
-8.  **Distribution:** Use `rsync` with timeout to copy the valid archive to all reachable `[DESTINATIONS]`.
+8.  **Distribution:** Use `rsync` with timeout to copy the valid archive to all reachable `[DESTINATIONS]`, falling back to direct copying via `cp -ru` if all rsync retry attempts fail.
 9.  **Cleanup:** If `[TARDISCARD] DISCARD=1`, remove old DISCARD-tagged backups. Prune log file if `[LOGPRUNE]` enabled.
 10. **Self-Maintenance:** Update cron job, remove temp files, release lock.
 
@@ -184,8 +184,8 @@ Cerebro treats this as an array of equals - no "primary" or "secondary". Before 
 **Features:**
 
 - **Automatic hostname appending**: If you define `/mnt/nas/backup/cerebro`, Cerebro will actually write to `/mnt/nas/backup/cerebro/hostname` - this allows multiple machines to use the same NAS share without conflicts.
-- **Resilience**: If one destination is offline (unmounted NAS), Cerebro continues with the available ones.
-- **Sync logic**: After creating a new backup, Cerebro attempts to copy it to ALL reachable destinations using `rsync` with timeout protection.
+- **Resilience**: If one destination is offline (unmounted NAS), Cerebro continues with the available ones, using a non-blocking double-forked background monitor to check connection responsiveness.
+- **Sync logic**: After creating a new backup, Cerebro attempts to copy it to ALL reachable destinations using `rsync` with timeout protection, falling back to direct copying via `cp -ru` if rsync fails.
 
 **Example:**
 
@@ -257,7 +257,7 @@ TIMEOUT=300
 RSYNC_TIMEOUT=30
 ```
 
-- **`RETRIES`**: Sets the number of `rsync` attempts to each backup destination. If omitted, defaults to `3` attempts.
+- **`RETRIES`**: Sets the number of `rsync` attempts to each backup destination (defaults to `3` attempts if omitted). If all attempts fail, Cerebro automatically falls back to copying files directly using `cp -ru`.
 - **`TIMEOUT`**: Sets the shell-level execution limit (in seconds) for each transfer command before it is force-killed. If omitted, defaults to `300` seconds (5 minutes).
 - **`RSYNC_TIMEOUT`**: Sets the connection/data inactivity timeout (in seconds) for the internal `rsync` command. If omitted, defaults to `30` seconds.
 
@@ -870,9 +870,9 @@ This simulates a cron-triggered run.
 
 ### Network Considerations
 
-- **rsync with timeout:** Cerebro uses `rsync` with a 300-second timeout. If a transfer hangs (NAS offline, network issue), it will abort and try the next destination.
+- **rsync with timeout and failover cp:** Cerebro uses `rsync` with a timeout limit. If the rsync transfer fails or hangs, it terminates the transfer and automatically falls back to copying files directly via `cp -ru`.
 - **Compression:** Backups are gzipped, reducing network transfer size.
-- **Cloud storage:** If using cloud mounts (rclone, etc.), ensure stable connectivity. Cerebro will skip unreachable destinations.
+- **Cloud storage and Mount checks:** To prevent execution blocks or hangs on slow or unresponsive cloud/FUSE mounts (like rclone), Cerebro runs a connection check using a double-forked background process before performing read or write operations.
 
 ---
 
