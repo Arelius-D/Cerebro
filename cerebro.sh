@@ -1,11 +1,11 @@
 #!/bin/bash
-# Cerebro v2.1 - Custom Backup Solution
+# Cerebro v2.9 - Custom Backup Solution
 # Copyright (c) 2026 Arelius-D | MIT License
 set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0" .sh)
 SCRIPT_TITLE="Custom Backup Solution for Files and Folders"
-CODE_VERSION="v2.1"
+CODE_VERSION="v2.9"
 SCRIPT_DIR="${SCRIPT_DIR:-$(dirname "$(realpath "$0")")}"
 SCRIPT_FILE_NAME="$SCRIPT_NAME.sh"
 ASSETS_DIR="$SCRIPT_DIR/assets"
@@ -15,6 +15,10 @@ BACKUP_DIR="$SCRIPT_DIR/backups"
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 HOSTNAME=$(hostname)
 declare -A nolog_changes
+active_destinations=()
+destinations_checked=0
+
+CURRENT_LOG_SECTION="INFO"
 
 log_message() {
     local message="$1"
@@ -24,22 +28,20 @@ log_message() {
         return
     elif [[ "$prefix" != "DEBUG" && ${INFO_ENABLED:-1} -eq 0 && ! "$message" =~ ^(ERROR|FILE|DIFFERENCE|\[backup_|SOURCE:) ]]; then
         return
-    elif [[ "$message" == "=========="* ]]; then
-        echo "$message" >> "$LOG_FILE"
+    fi
+
+    if [[ "$message" == "=========="* ]]; then
+        CURRENT_LOG_SECTION="INFO"
+    elif [[ "$message" =~ ^\[([^\]]+)\]$ ]]; then
+        CURRENT_LOG_SECTION="${BASH_REMATCH[1]}"
         return
     elif [[ "$message" == "" ]]; then
-        echo "" >> "$LOG_FILE"
-        return
-    elif [[ "$message" =~ ^\[[A-Za-z]+\]$ ]]; then
-        echo "    $message" >> "$LOG_FILE"
         return
     fi
 
-    if [[ "$message" =~ ^(Run Type|Timestamp|Backup Name): ]]; then
-        echo "  $(date '+%Y-%m-%d %H:%M:%S') - $message" >> "$LOG_FILE"
-    else
-        echo "        $(date '+%Y-%m-%d %H:%M:%S') - $message" >> "$LOG_FILE"
-    fi
+    while IFS= read -r line; do
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - [$CURRENT_LOG_SECTION] $line" >>"$LOG_FILE"
+    done <<<"$message"
 }
 
 BACKUP_TYPE="manual"
@@ -47,7 +49,7 @@ BACKUP_SUFFIX="a"
 if [ "${1:-}" = "--update" ]; then
     BACKUP_TYPE="cron"
     HOUR=$(date +%H | sed 's/^0//')
-    BACKUP_SUFFIX=$(( (HOUR / 6) + 1 ))
+    BACKUP_SUFFIX=$(((HOUR / 6) + 1))
 fi
 BACKUP_NAME="backup_${TIMESTAMP}-${BACKUP_SUFFIX}.tar.gz"
 
@@ -55,7 +57,7 @@ manual_counter_file="$ASSETS_DIR/.manual_backup_counter"
 if [ "$BACKUP_TYPE" = "manual" ]; then
     mkdir -p "$ASSETS_DIR"
     if [ -f "$manual_counter_file" ]; then
-        read -r counter < "$manual_counter_file"
+        read -r counter <"$manual_counter_file"
         counter=${counter:-a}
         if [ "$counter" = "z" ]; then
             counter="a"
@@ -66,7 +68,7 @@ if [ "$BACKUP_TYPE" = "manual" ]; then
         counter="a"
     fi
     log_message "DEBUG: Setting manual backup suffix to $counter"
-    echo "$counter" > "$manual_counter_file"
+    echo "$counter" >"$manual_counter_file"
     BACKUP_SUFFIX="$counter"
     BACKUP_NAME="backup_${TIMESTAMP}-${BACKUP_SUFFIX}.tar.gz"
 fi
@@ -109,6 +111,9 @@ parse_rules() {
     cron_schedule=""
     logprune_enabled=0
     logprune_discard_max_age_days=1
+    RSYNC_RETRIES=3
+    RSYNC_TIMEOUT_LIMIT=300
+    RSYNC_CONN_TIMEOUT=30
 
     if [ ! -f "$CONFIG" ]; then
         echo "[ERROR] $CONFIG not found."
@@ -124,51 +129,60 @@ parse_rules() {
             continue
         fi
         case "$section" in
-            INCLUDE)
-                [[ -n "$line" ]] && items+=("$line")
-                ;;
-            EXCLUDE)
-                [[ -n "$line" ]] && ignores+=("$line")
-                ;;
-            LOGDIFF)
-                [[ -n "$line" ]] && logdiffs+=("$line")
-                ;;
-            NOLOG)
-                [[ -n "$line" ]] && nologs+=("$line")
-                ;;
-            DESTINATIONS)
-                [[ -n "$line" ]] && destinations+=("${line%/}/$HOSTNAME")
-                ;;
-            SCHEDULE)
-                if [[ "$line" =~ ^cron=([0-1])$ ]]; then
-                    cron_enabled="${BASH_REMATCH[1]}"
-                elif [[ "$line" =~ ^schedule=(.*)$ ]]; then
-                    cron_schedule="${BASH_REMATCH[1]}"
-                fi
-                ;;
-            LOGTYPE)
-                if [[ "$line" =~ ^DEBUG=([0-1])$ ]]; then
-                    DEBUG_ENABLED="${BASH_REMATCH[1]}"
-                elif [[ "$line" =~ ^INFO=([0-1])$ ]]; then
-                    INFO_ENABLED="${BASH_REMATCH[1]}"
-                elif [[ "$line" =~ ^NOFIRSTRUN=([0-1])$ ]]; then
-                    NOFIRSTRUN="${BASH_REMATCH[1]}"
-                fi
-                ;;
-            TARDISCARD)
-                if [[ "$line" =~ ^DISCARD=([0-1])$ ]]; then
-                    DISCARD_ENABLED="${BASH_REMATCH[1]}"
-                fi
-                ;;
-            LOGPRUNE)
-                if [[ "$line" =~ ^ENABLED=([0-1])$ ]]; then
-                    logprune_enabled="${BASH_REMATCH[1]}"
-                elif [[ "$line" =~ ^DISCARD_MAX_AGE_DAYS=([0-9]+)$ ]]; then
-                    logprune_discard_max_age_days="${BASH_REMATCH[1]}"
-                fi
-                ;;
+        INCLUDE)
+            [[ -n "$line" ]] && items+=("$line")
+            ;;
+        EXCLUDE)
+            [[ -n "$line" ]] && ignores+=("$line")
+            ;;
+        LOGDIFF)
+            [[ -n "$line" ]] && logdiffs+=("$line")
+            ;;
+        NOLOG)
+            [[ -n "$line" ]] && nologs+=("$line")
+            ;;
+        DESTINATIONS)
+            [[ -n "$line" ]] && destinations+=("${line%/}/$HOSTNAME")
+            ;;
+        SCHEDULE)
+            if [[ "$line" =~ ^cron=([0-1])$ ]]; then
+                cron_enabled="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^schedule=(.*)$ ]]; then
+                cron_schedule="${BASH_REMATCH[1]}"
+            fi
+            ;;
+        LOGTYPE)
+            if [[ "$line" =~ ^DEBUG=([0-1])$ ]]; then
+                DEBUG_ENABLED="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^INFO=([0-1])$ ]]; then
+                INFO_ENABLED="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^NOFIRSTRUN=([0-1])$ ]]; then
+                NOFIRSTRUN="${BASH_REMATCH[1]}"
+            fi
+            ;;
+        TARDISCARD)
+            if [[ "$line" =~ ^DISCARD=([0-1])$ ]]; then
+                DISCARD_ENABLED="${BASH_REMATCH[1]}"
+            fi
+            ;;
+        TRANSFER)
+            if [[ "$line" =~ ^RETRIES=([0-9]+)$ ]]; then
+                RSYNC_RETRIES="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^TIMEOUT=([0-9]+)$ ]]; then
+                RSYNC_TIMEOUT_LIMIT="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^RSYNC_TIMEOUT=([0-9]+)$ ]]; then
+                RSYNC_CONN_TIMEOUT="${BASH_REMATCH[1]}"
+            fi
+            ;;
+        LOGPRUNE)
+            if [[ "$line" =~ ^ENABLED=([0-1])$ ]]; then
+                logprune_enabled="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^DISCARD_MAX_AGE_DAYS=([0-9]+)$ ]]; then
+                logprune_discard_max_age_days="${BASH_REMATCH[1]}"
+            fi
+            ;;
         esac
-    done < "$CONFIG"
+    done <"$CONFIG"
 
     for item in "${items[@]}"; do
         if [ -f "$item" ]; then
@@ -199,13 +213,79 @@ matches_pattern() {
         fi
     fi
     case "$string" in
-        $pattern)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
+    $pattern)
+        return 0
+        ;;
+    *)
+        return 1
+        ;;
     esac
+}
+
+is_destination_responsive() {
+    local dest="$1"
+
+    (
+        local check_path="$dest"
+        while [ -n "$check_path" ] && [ "$check_path" != "/" ]; do
+            if [ -d "$check_path" ]; then
+                break
+            fi
+            check_path=$(dirname "$check_path")
+        done
+
+        if [ -z "$check_path" ] || [ "$check_path" = "/" ]; then
+            exit 2
+        fi
+
+        timeout 3 ls -d "$check_path" >/dev/null 2>&1 < /dev/null
+    ) &
+    local test_pid=$!
+
+    local timeout_limit=20
+    local elapsed=0
+    while :; do
+        local state
+        state=$(ps -p "$test_pid" -o state= 2>/dev/null | tr -d '[:space:]')
+        if [ -z "$state" ] || [ "$state" = "Z" ] || [ "$state" = "X" ]; then
+            break
+        fi
+        if [ $elapsed -ge $timeout_limit ]; then
+            kill -9 "$test_pid" >/dev/null 2>&1
+            wait "$test_pid" >/dev/null 2>&1 || true
+            return 1
+        fi
+        sleep 0.1
+        ((elapsed++))
+    done
+
+    local exit_code=0
+    wait "$test_pid" || exit_code=$?
+
+    if [ $exit_code -eq 124 ]; then
+        return 1
+    elif [ $exit_code -eq 2 ]; then
+        return 1
+    else
+        return 0
+    fi
+}
+
+get_active_destinations() {
+    if [ "$destinations_checked" -eq 1 ]; then
+        return 0
+    fi
+    active_destinations=()
+    for dest in "${destinations[@]}"; do
+        if is_destination_responsive "$dest"; then
+            active_destinations+=("$dest")
+        else
+            log_message "WARNING: Destination $dest is unresponsive or offline, skipping."
+            echo "WARNING: Destination $dest is unresponsive or offline, skipping."
+        fi
+    done
+    destinations_checked=1
+    return 0
 }
 
 build_exclude_patterns() {
@@ -299,8 +379,8 @@ verify_tar() {
 }
 
 cleanup_log() {
-    if [ ! -f "$LOG_FILE" ]; then
-        return
+    if [ ! -s "$LOG_FILE" ]; then
+        return 0
     fi
     local temp_log=""
     local retries=3
@@ -319,34 +399,42 @@ cleanup_log() {
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     local processed_patterns=()
     while IFS= read -r line; do
-        if [[ "$line" == *[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\ -\ Changes\ detected\ in\ * ]]; then
-            local file_path="${line#* Changes detected in }"
+        if [[ "$line" == *==========\ BACKUP\ RUN\ STARTED\ ==========* ]]; then
+            processed_patterns=()
+        fi
+        if [[ "$line" == *[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\ -\ \[Comparison\]\ \[NOLOG\]\ *Change\ detected\ but\ not\ logged* || "$line" == *[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\ -\ \[Comparison\]\ \[NOLOG\]\ *Multiple\ changes\ detected\ but\ not\ logged* ]]; then
+            continue
+        elif [[ "$line" == *[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\ -\ \[Comparison\]\ \[NOLOG\]\ * ]]; then
+            local line_timestamp="${line:0:19}"
+            local file_path="${line#* - \[Comparison\] \[NOLOG\] }"
             file_path="${file_path%% [REDACTED]*}"
             local is_nolog=0
             for pattern in "${nologs[@]}"; do
-                if [[ "$pattern" == *'*' && "$file_path" == "$pattern"* && ! " ${processed_patterns[*]} " =~ " $pattern " ]]; then
-                    local match_count=$(grep -cE "Changes detected in $pattern( \[REDACTED\])?" "$LOG_FILE")
-                    echo "        $timestamp - Changes detected in $pattern [REDACTED]" >> "$temp_log"
-                    if [ $match_count -gt 1 ]; then
-                        echo "        $timestamp - [NOLOG]: Multiple changes detected but not logged (see [NOLOG] in $SCRIPT_NAME.cfg)" >> "$temp_log"
+                if matches_pattern "$file_path" "$pattern"; then
+                    if [[ "$pattern" == *'*' ]]; then
+                        if [[ ! " ${processed_patterns[*]} " =~ " $pattern " ]]; then
+                            local match_count=$(grep -cE "\[Comparison\] \[NOLOG\] $pattern( \[REDACTED\])?" "$LOG_FILE")
+                            echo "$line_timestamp - [Comparison] [NOLOG] $pattern [REDACTED]" >>"$temp_log"
+                            if [ $match_count -gt 1 ]; then
+                                echo "$line_timestamp - [Comparison] [NOLOG] Multiple changes detected but not logged (see [NOLOG] in $SCRIPT_NAME.cfg)" >>"$temp_log"
+                            else
+                                echo "$line_timestamp - [Comparison] [NOLOG] Change detected but not logged (see [NOLOG] in $SCRIPT_NAME.cfg)" >>"$temp_log"
+                            fi
+                            processed_patterns+=("$pattern")
+                        fi
                     else
-                        echo "        $timestamp - [NOLOG]: Change detected but not logged (see [NOLOG] in $SCRIPT_NAME.cfg)" >> "$temp_log"
+                        echo "$line_timestamp - [Comparison] [NOLOG] $pattern" >>"$temp_log"
+                        echo "$line_timestamp - [Comparison] [NOLOG] Change detected but not logged (see [NOLOG] in $SCRIPT_NAME.cfg)" >>"$temp_log"
                     fi
-                    processed_patterns+=("$pattern")
-                    is_nolog=1
-                    break
-                elif [[ "$file_path" == "$pattern" ]]; then
-                    echo "        $timestamp - Changes detected in $pattern" >> "$temp_log"
-                    echo "        $timestamp - [NOLOG]: Change detected but not logged (see [NOLOG] in $SCRIPT_NAME.cfg)" >> "$temp_log"
                     is_nolog=1
                     break
                 fi
             done
-            [ $is_nolog -eq 0 ] && echo "$line" >> "$temp_log"
+            [ $is_nolog -eq 0 ] && echo "$line" >>"$temp_log"
         else
-            echo "$line" >> "$temp_log"
+            echo "$line" >>"$temp_log"
         fi
-    done < "$LOG_FILE"
+    done <"$LOG_FILE"
     if [ -s "$temp_log" ]; then
         mv "$temp_log" "$LOG_FILE" || {
             log_message "ERROR: Failed to move $temp_log to $LOG_FILE."
@@ -371,7 +459,7 @@ prune_log_file() {
         return 0
     fi
 
-    local delimiter="========== BACKUP RUN STARTED =========="
+    local delimiter="[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} - [[]INFO[]] ========== BACKUP RUN STARTED =========="
 
     local awk_script='
     BEGIN {
@@ -382,18 +470,20 @@ prune_log_file() {
     {
         if (first_block) {
             printf "%s", $0
+            prev_rt = RT
             first_block = 0
             next
         }
 
-        full_block = delimiter $0
+        full_block = prev_rt $0
+        prev_rt = RT
 
-        if (full_block ~ /INFO: Backup tagged as: RETAIN/) {
+        if (full_block ~ /Backup tagged as: RETAIN/) {
             printf "%s", full_block
             next
         }
 
-        if (full_block ~ /INFO: Backup tagged as: DISCARD/) {
+        if (full_block ~ /Backup tagged as: DISCARD/) {
             if (match(full_block, /Timestamp: ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})/, arr)) {
                 run_date_str = arr[1]
                 gsub(/[-:]/, " ", run_date_str)
@@ -431,16 +521,16 @@ prune_log_file() {
         return 1
     }
 
-    gawk -v cutoff="$cutoff_timestamp" -v delimiter="$delimiter" "$awk_script" "$LOG_FILE" > "$temp_log"
+    gawk -v cutoff="$cutoff_timestamp" -v delimiter="$delimiter" "$awk_script" "$LOG_FILE" >"$temp_log"
 
     if [ -s "$temp_log" ]; then
         local lines_before
-        lines_before=$(wc -l < "$LOG_FILE")
+        lines_before=$(wc -l <"$LOG_FILE")
         local lines_after
-        lines_after=$(wc -l < "$temp_log")
+        lines_after=$(wc -l <"$temp_log")
         local lines_pruned=$((lines_before - lines_after))
         if [ "$lines_pruned" -gt 0 ]; then
-            log_message "INFO: Pruned $lines_pruned lines from the log file."
+            log_message "Pruned $lines_pruned lines from the log file."
         fi
         mv "$temp_log" "$LOG_FILE"
     else
@@ -452,38 +542,93 @@ prune_log_file() {
 run_rsync() {
     local src="$1"
     local dest="$2"
-    local retries=3
-    local timeout=300
+    local retries="${RSYNC_RETRIES:-3}"
+    local timeout="${RSYNC_TIMEOUT_LIMIT:-300}"
+    local conn_timeout="${RSYNC_CONN_TIMEOUT:-30}"
     local attempt=1
-    local rsync_output
+    local rsync_output=""
+
     while [ $attempt -le $retries ]; do
         log_message "DEBUG: Attempt $attempt of rsync from $src to $dest"
-        rsync_output=$(timeout $timeout rsync -av --timeout=30 "$src" "$dest" 2>&1)
-        if [ $? -eq 0 ]; then
-            log_message "DEBUG: rsync succeeded on attempt $attempt"
-            echo "$rsync_output"
-            return 0
+        
+        local status_file
+        status_file=$(mktemp) || return 1
+        local log_file
+        log_file=$(mktemp) || { rm -f "$status_file"; return 1; }
+
+        (
+            (
+                local ec=0
+                rsync -av --timeout=$conn_timeout "$src" "$dest" >"$log_file" 2>&1 || ec=$?
+                echo $ec >"$status_file"
+            ) </dev/null >/dev/null 2>&1 &
+        )
+
+        local start_time
+        start_time=$(date +%s)
+        local finished=0
+        while :; do
+            if [ -s "$status_file" ]; then
+                finished=1
+                break
+            fi
+            local current_time
+            current_time=$(date +%s)
+            if [ $((current_time - start_time)) -ge $timeout ]; then
+                break
+            fi
+            sleep 1
+        done
+
+        if [ $finished -eq 1 ]; then
+            local exit_code
+            read -r exit_code <"$status_file"
+            rsync_output=$(cat "$log_file")
+            rm -f "$status_file" "$log_file"
+            if [ "$exit_code" -eq 0 ]; then
+                log_message "DEBUG: rsync succeeded on attempt $attempt"
+                echo "$rsync_output"
+                return 0
+            else
+                log_message "DEBUG: rsync attempt $attempt failed: $rsync_output"
+            fi
         else
-            log_message "WARNING: rsync attempt $attempt failed: $rsync_output"
-            sleep 10
-            ((attempt++))
+            rm -f "$status_file" "$log_file"
+            log_message "DEBUG: rsync attempt $attempt timed out/hung."
+            rsync_output="rsync timed out/hung after $timeout seconds."
         fi
+
+        sleep 10
+        ((attempt++))
     done
-    log_message "ERROR: rsync failed after $retries attempts"
+
+    log_message "DEBUG: rsync failed after $retries attempts"
     echo "$rsync_output"
     return 1
 }
 
 sync_destinations() {
     log_message "[Sync Destinations]"
-    if [ ${#destinations[@]} -lt 2 ]; then
-        log_message "Only one destination, no sync needed."
+    get_active_destinations
+    
+    local valid_dests=()
+    for dest in "${active_destinations[@]}"; do
+        if is_destination_responsive "$dest"; then
+            valid_dests+=("$dest")
+        else
+            log_message "WARNING: Destination $dest is unresponsive, skipping sync checks."
+        fi
+    done
+    active_destinations=("${valid_dests[@]}")
+
+    if [ ${#active_destinations[@]} -lt 2 ]; then
+        log_message "Only one destination responsive, no sync needed."
         return 0
     fi
     local primary_dest=""
     local max_files=0
     local metadata_file="$ASSETS_DIR/.tar_meta_data.txt"
-    for dest in "${destinations[@]}"; do
+    for dest in "${active_destinations[@]}"; do
         mkdir -p "$dest"
         local file_count=$(ls "$dest"/*.tar.gz 2>/dev/null | wc -l)
         if [ $file_count -gt $max_files ]; then
@@ -495,7 +640,7 @@ sync_destinations() {
 
     if [ -z "$primary_dest" ] && [ -f "$metadata_file" ]; then
         local latest_file=$(tail -n 1 "$metadata_file" | cut -d: -f1)
-        for dest in "${destinations[@]}"; do
+        for dest in "${active_destinations[@]}"; do
             mkdir -p "$dest"
             if [ -f "$dest/$latest_file" ]; then
                 primary_dest="$dest"
@@ -508,19 +653,23 @@ sync_destinations() {
         log_message "No backups found in any destination, skipping sync."
         return 0
     fi
-    echo "$primary_dest" > "$ASSETS_DIR/.primary_dest"
-    for dest in "${destinations[@]}"; do
+    echo "$primary_dest" >"$ASSETS_DIR/.primary_dest"
+    for dest in "${active_destinations[@]}"; do
         if [ "$dest" != "$primary_dest" ]; then
             mkdir -p "$dest"
             local start_time=$(date +%s)
-            rsync_output=$(run_rsync "$primary_dest/" "$dest/")
-            if [ $? -eq 0 ]; then
+            if rsync_output=$(run_rsync "$primary_dest/" "$dest/"); then
                 log_message "Synced backups from $primary_dest to $dest via rsync."
                 sync
             else
                 log_message "WARNING: Failed to sync backups to $dest: $rsync_output"
+                local new_active=()
+                for ad in "${active_destinations[@]}"; do
+                    [ "$ad" != "$dest" ] && new_active+=("$ad")
+                done
+                active_destinations=("${new_active[@]}")
             fi
-            [ ${DEBUG_ENABLED:-0} -eq 1 ] && log_message "DEBUG: Sync to $dest took: $(( $(date +%s) - start_time )) seconds"
+            [ ${DEBUG_ENABLED:-0} -eq 1 ] && log_message "DEBUG: Sync to $dest took: $(($(date +%s) - start_time)) seconds"
         fi
     done
     return 0
@@ -533,8 +682,17 @@ compare_tars() {
     local metadata_file="$ASSETS_DIR/.tar_meta_data.txt"
 
     log_message "DEBUG: Entering compare_tars for $new_tar"
+    get_active_destinations
+    
+    local valid_dests=()
+    for dest in "${active_destinations[@]}"; do
+        if is_destination_responsive "$dest"; then
+            valid_dests+=("$dest")
+        fi
+    done
+    active_destinations=("${valid_dests[@]}")
 
-    for dest in "${destinations[@]}"; do
+    for dest in "${active_destinations[@]}"; do
         mkdir -p "$dest"
         local file_count=$(ls "$dest"/*.tar.gz 2>/dev/null | wc -l)
         if [ $file_count -gt 0 ]; then
@@ -547,7 +705,7 @@ compare_tars() {
 
     if [ -z "$latest_backup" ] && [ -f "$metadata_file" ]; then
         local latest_file=$(tail -n 1 "$metadata_file" | cut -d: -f1)
-        for dest in "${destinations[@]}"; do
+        for dest in "${active_destinations[@]}"; do
             mkdir -p "$dest"
             if [ -f "$dest/$latest_file" ]; then
                 latest_backup="$dest/$latest_file"
@@ -568,7 +726,8 @@ compare_tars() {
             done
         fi
         mkdir -p "$ASSETS_DIR"
-        echo "${new_tar##*/}:RETAIN:FIRST" > "$metadata_file"
+        echo "${new_tar##*/}:RETAIN:FIRST" >"$metadata_file"
+        log_message "[META] Backup tagged as: RETAIN"
         log_message "DEBUG: Exiting compare_tars (no previous backup)"
         return 0
     fi
@@ -629,7 +788,7 @@ compare_tars() {
                 fi
             done
             if [ $nolog_matched -eq 0 ]; then
-                log_message "New file detected: $source_path"
+                log_message "[NEW] $source_path"
                 retain_changes=1
             fi
         elif ! cmp -s "$new_file" "$old_file" 2>>"$LOG_FILE"; then
@@ -649,25 +808,22 @@ compare_tars() {
             done
             if [ $nolog_matched -eq 0 ]; then
                 if should_log_diff "$source_path"; then
-                    log_message "Changes detected in FILE: $source_path"
+                    log_message "[MOD] $source_path"
                     retain_changes=1
                     diff_output=$(diff -u "$old_file" "$new_file" 2>>"$LOG_FILE" || true)
                     if [ -n "$diff_output" ]; then
                         while IFS= read -r line; do
                             if [[ "$line" == -* && "$line" != ---* ]]; then
-                                log_message "Removed from the FILE: '${line#-}'"
+                                log_message "[-] '${line#-}'"
                             elif [[ "$line" == +* && "$line" != +++* ]]; then
-                                log_message "Added to the FILE: '${line#+}'"
+                                log_message "[+] '${line#+}'"
                             fi
-                        done <<< "$diff_output"
-                        log_message ""
+                        done <<<"$diff_output"
                     else
-                        log_message "Modified, FILE:"
-                        log_message "'$(cat "$new_file" 2>>"$LOG_FILE" | head -n 1)'"
-                        log_message ""
+                        log_message "[MOD] $source_path"
                     fi
                 else
-                    log_message "Changes detected in $source_path"
+                    log_message "[MOD] $source_path"
                     retain_changes=1
                 fi
             fi
@@ -707,7 +863,7 @@ compare_tars() {
                 fi
             done
             if [ $nolog_matched -eq 0 ]; then
-                log_message "File deleted: $source_path"
+                log_message "[DEL] $source_path"
                 retain_changes=1
             fi
         fi
@@ -725,16 +881,16 @@ compare_tars() {
 
     for path in "${!nolog_changes[@]}"; do
         if [[ "${nolog_changes[$path]}" == "single" ]]; then
-            log_message "Changes detected in $path"
-            log_message "[NOLOG]: Change detected but not logged (see [NOLOG] in $SCRIPT_NAME.cfg)"
+            log_message "[NOLOG] $path"
+            log_message "[NOLOG] Change detected but not logged (see [NOLOG] in $SCRIPT_NAME.cfg)"
         else
             changes=($(echo -e "${nolog_changes[$path]}" | tr '\n' ' '))
             if [ ${#changes[@]} -gt 1 ]; then
-                log_message "Changes detected in $path [REDACTED]"
-                log_message "[NOLOG]: Multiple changes detected but not logged (see [NOLOG] in $SCRIPT_NAME.cfg)"
+                log_message "[NOLOG] $path [REDACTED]"
+                log_message "[NOLOG] Multiple changes detected but not logged (see [NOLOG] in $SCRIPT_NAME.cfg)"
             else
-                log_message "Changes detected in ${changes[0]}"
-                log_message "[NOLOG]: Change detected but not logged (see [NOLOG] in $SCRIPT_NAME.cfg)"
+                log_message "[NOLOG] ${changes[0]}"
+                log_message "[NOLOG] Change detected but not logged (see [NOLOG] in $SCRIPT_NAME.cfg)"
             fi
         fi
     done
@@ -748,7 +904,7 @@ compare_tars() {
     fi
 
     if [ $has_changes -eq 0 ]; then
-        log_message "INFO: Backup Skipped: No Changes Detected"
+        log_message "[META] Backup Skipped: No Changes Detected"
         rm -f "$new_tar"
         echo "[INFO] No changes detected. Backup creation skipped."
         log_message "DEBUG: Exiting compare_tars (no changes)"
@@ -768,18 +924,18 @@ compare_tars() {
             while IFS=: read -r tar_file old_tag old_subtag; do
                 if [[ "$old_tag" == "DISCARD" && "$old_subtag" == "LATEST" ]]; then
                     prev_discard_latest="$tar_file"
-                    echo "$tar_file:DISCARD" >> "$temp_metadata"
+                    echo "$tar_file:DISCARD" >>"$temp_metadata"
                 else
-                    echo "$tar_file:$old_tag${old_subtag:+:$old_subtag}" >> "$temp_metadata"
+                    echo "$tar_file:$old_tag${old_subtag:+:$old_subtag}" >>"$temp_metadata"
                 fi
-            done < "$metadata_file"
+            done <"$metadata_file"
             mv "$temp_metadata" "$metadata_file"
         fi
-        echo "${new_tar##*/}:$tag$subtag" >> "$metadata_file"
-        log_message "INFO: Backup tagged as: $tag$subtag"
-        log_message "Changes detected between:"
-        log_message "  New: $new_tar"
-        log_message "  Previous: $latest_backup"
+        echo "${new_tar##*/}:$tag$subtag" >>"$metadata_file"
+        log_message "[META] Backup tagged as: $tag$subtag"
+        log_message "[META] Changes detected between:"
+        log_message "[META] New: $new_tar"
+        log_message "[META] Previous: $latest_backup"
         echo "$prev_discard_latest"
         log_message "DEBUG: Exiting compare_tars (changes detected)"
         return 0
@@ -803,8 +959,8 @@ create_backup() {
         rm -f "$new_tar"
         return 1
     fi
-    log_message "INFO: Backup created: $new_tar"
-    echo "INFO: Backup created: $new_tar"
+    log_message "Backup created: $new_tar"
+    echo "Backup created: $new_tar"
     move_backup
     old_tar_removal
     return 0
@@ -813,26 +969,41 @@ create_backup() {
 move_backup() {
     local at_least_one_success=0
     log_message "[Transfer]"
-    for dest in "${destinations[@]}"; do
+    get_active_destinations
+    for dest in "${active_destinations[@]}"; do
+        if ! is_destination_responsive "$dest"; then
+            log_message "WARNING: Destination $dest became unresponsive, skipping transfer."
+            echo "WARNING: Destination $dest became unresponsive, skipping transfer."
+            local new_active=()
+            for ad in "${active_destinations[@]}"; do
+                [ "$ad" != "$dest" ] && new_active+=("$ad")
+            done
+            active_destinations=("${new_active[@]}")
+            continue
+        fi
         mkdir -p "$dest"
         local start_time=$(date +%s)
-        rsync_output=$(run_rsync "$BACKUP_DIR/$BACKUP_NAME" "$dest/")
-        if [ $? -eq 0 ]; then
-            log_message "INFO: Backup copied to $dest/$BACKUP_NAME via rsync."
-            echo "INFO: Backup copied to $dest/$BACKUP_NAME"
+        if rsync_output=$(run_rsync "$BACKUP_DIR/$BACKUP_NAME" "$dest/"); then
+            log_message "Backup copied to $dest/$BACKUP_NAME via rsync."
+            echo "Backup copied to $dest/$BACKUP_NAME"
             sync
             at_least_one_success=1
         else
             log_message "WARNING: Failed to copy backup to $dest via rsync: $rsync_output"
             echo "WARNING: Failed to copy backup to $dest"
+            local new_active=()
+            for ad in "${active_destinations[@]}"; do
+                [ "$ad" != "$dest" ] && new_active+=("$ad")
+            done
+            active_destinations=("${new_active[@]}")
         fi
-        [ ${DEBUG_ENABLED:-0} -eq 1 ] && log_message "DEBUG: Transfer to $dest took: $(( $(date +%s) - start_time )) seconds"
+        [ ${DEBUG_ENABLED:-0} -eq 1 ] && log_message "DEBUG: Transfer to $dest took: $(($(date +%s) - start_time)) seconds"
     done
     log_message "[Cleanup]"
     if [ $at_least_one_success -eq 1 ]; then
         rm -f "$BACKUP_DIR/$BACKUP_NAME"
-        log_message "INFO: Backup removed from $BACKUP_DIR/$BACKUP_NAME"
-        echo "INFO: Local backup removed: $BACKUP_DIR/$BACKUP_NAME"
+        log_message "Backup removed from $BACKUP_DIR/$BACKUP_NAME"
+        echo "Local backup removed: $BACKUP_DIR/$BACKUP_NAME"
     else
         log_message "ERROR: No backups copied successfully, retaining $BACKUP_DIR/$BACKUP_NAME"
         echo "ERROR: No backups copied successfully, retaining $BACKUP_DIR/$BACKUP_NAME"
@@ -851,7 +1022,7 @@ setup_cron_job() {
         if crontab -l 2>/dev/null | grep -F "$cron_command" >/dev/null; then
             crontab -l 2>/dev/null | grep -vF "$cron_command" | crontab -
             echo "[INFO] Cron job for $SCRIPT_FILE_NAME --update removed."
-            log_message "INFO: Cron job for $SCRIPT_FILE_NAME --update removed."
+            log_message "Cron job for $SCRIPT_FILE_NAME --update removed."
         else
             log_message "Cron job setup skipped (disabled in $SCRIPT_NAME.cfg)."
         fi
@@ -860,13 +1031,16 @@ setup_cron_job() {
 
     if crontab -l 2>/dev/null | grep -F "$cron_entry" >/dev/null; then
         echo "[INFO] Cron job for $SCRIPT_FILE_NAME --update already exists with schedule '$cron_schedule'."
-        log_message "INFO: Cron job for $SCRIPT_FILE_NAME --update already exists with schedule '$cron_schedule'."
+        log_message "Cron job for $SCRIPT_FILE_NAME --update already exists with schedule '$cron_schedule'."
     else
         if crontab -l 2>/dev/null | grep -F "$cron_command" >/dev/null; then
             crontab -l 2>/dev/null | grep -vF "$cron_command" | crontab -
-            log_message "INFO: Removed outdated cron job for $SCRIPT_FILE_NAME --update."
+            log_message "Removed outdated cron job for $SCRIPT_FILE_NAME --update."
         fi
-        (crontab -l 2>/dev/null; echo "$cron_entry") | crontab -
+        (
+            crontab -l 2>/dev/null
+            echo "$cron_entry"
+        ) | crontab -
         echo "[SUCCESS] Cron job added: $SCRIPT_FILE_NAME --update with schedule '$cron_schedule'."
         log_message "SUCCESS: Cron job added: $SCRIPT_FILE_NAME --update with schedule '$cron_schedule'."
     fi
@@ -874,14 +1048,24 @@ setup_cron_job() {
 
 old_tar_removal() {
     if [ "${DISCARD_ENABLED:-0}" -eq 0 ]; then
-        log_message "INFO: Tar removal disabled in [TARDISCARD] section."
+        log_message "Tar removal disabled in [TARDISCARD] section."
         return 0
     fi
 
     log_message "[Tar Removal]"
+    get_active_destinations
+    
+    local valid_dests=()
+    for dest in "${active_destinations[@]}"; do
+        if is_destination_responsive "$dest"; then
+            valid_dests+=("$dest")
+        fi
+    done
+    active_destinations=("${valid_dests[@]}")
+
     local metadata_file="$ASSETS_DIR/.tar_meta_data.txt"
     if [ ! -f "$metadata_file" ]; then
-        log_message "INFO: No metadata file found, skipping tar removal."
+        log_message "No metadata file found, skipping tar removal."
         return 0
     fi
 
@@ -891,14 +1075,14 @@ old_tar_removal() {
         if [[ "$tag" == "DISCARD" && "$subtag" == "LATEST" ]]; then
             latest_discard="$tar_file"
         elif [[ "$tag" == "DISCARD" ]]; then
-            for dest in "${destinations[@]}"; do
+            for dest in "${active_destinations[@]}"; do
                 if [ -f "$dest/$tar_file" ]; then
                     rm -f "$dest/$tar_file" && log_message "Removed $tar_file from $dest."
                 fi
             done
         fi
-        echo "$tar_file:$tag${subtag:+:$subtag}" >> "$temp_metadata"
-    done < "$metadata_file"
+        echo "$tar_file:$tag${subtag:+:$subtag}" >>"$temp_metadata"
+    done <"$metadata_file"
 
     if [ -s "$temp_metadata" ]; then
         mv "$temp_metadata" "$metadata_file"
@@ -911,7 +1095,7 @@ old_tar_removal() {
 
 wait_for_background() {
     log_message "DEBUG: Waiting for background processes to complete"
-    while pgrep -P $$ > /dev/null 2>&1; do
+    while pgrep -P $$ >/dev/null 2>&1; do
         sleep 1
     done
     log_message "DEBUG: All background processes completed"
@@ -927,7 +1111,7 @@ main() {
             echo "[ERROR] Failed to read lock file $LOCK_FILE"
             exit 1
         }
-        if ! ps -p "$pid" > /dev/null 2>&1; then
+        if ! ps -p "$pid" >/dev/null 2>&1; then
             log_message "WARNING: Stale lock file found for PID $pid, removing."
             rm -f "$LOCK_FILE" || {
                 echo "ERROR: Failed to remove stale lock file $LOCK_FILE" >>"$TEMP_LOG"
@@ -940,7 +1124,7 @@ main() {
             exit 1
         fi
     fi
-    echo $$ > "$LOCK_FILE" || {
+    echo $$ >"$LOCK_FILE" || {
         echo "ERROR: Failed to create lock file $LOCK_FILE" >>"$TEMP_LOG"
         echo "[ERROR] Failed to create lock file $LOCK_FILE"
         exit 1
@@ -955,6 +1139,7 @@ main() {
         log_message "ERROR: build_exclude_patterns failed."
         exit 1
     fi
+    cleanup_log
     prune_log_file
     log_message "========== BACKUP RUN STARTED =========="
     log_message "Run Type: $BACKUP_TYPE"
@@ -971,7 +1156,7 @@ main() {
     fi
     sync_destinations
     if ! create_backup; then
-        log_message "INFO: Backup process completed with no new backup created."
+        log_message "Backup process completed with no new backup created."
     fi
     setup_cron_job
 }

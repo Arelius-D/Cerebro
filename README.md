@@ -1,6 +1,6 @@
-﻿# Cerebro: Intelligent Differential Backup & State Monitoring
+# Cerebro: Intelligent Differential Backup & State Monitoring
 
-> **Version:** v2.2  
+> **Version:** v2.9  
 > **Core Philosophy:** "Read, Understand, Verify."
 
 ## 1. What is Cerebro?
@@ -246,6 +246,23 @@ When you run `./cerebro.sh` for the first time (or any time config changes), it 
 
 ---
 
+### `[TRANSFER]` (Transfer Retries Settings)
+
+**Configure copy/rsync retry attempts to destinations.**
+
+```ini
+[TRANSFER]
+RETRIES=1
+TIMEOUT=300
+RSYNC_TIMEOUT=30
+```
+
+- **`RETRIES`**: Sets the number of `rsync` attempts to each backup destination. If omitted, defaults to `3` attempts.
+- **`TIMEOUT`**: Sets the shell-level execution limit (in seconds) for each transfer command before it is force-killed. If omitted, defaults to `300` seconds (5 minutes).
+- **`RSYNC_TIMEOUT`**: Sets the connection/data inactivity timeout (in seconds) for the internal `rsync` command. If omitted, defaults to `30` seconds.
+
+---
+
 ### `[LOGTYPE]` (Verbosity Control)
 
 **Control what gets written to `cerebro.log`.**
@@ -482,41 +499,30 @@ Every 5 minutes, Cerebro checks critical system files. If someone adds an SSH ke
 **Example cerebro.log output after a run where docker-compose.yml changed:**
 
 ```
-========== BACKUP RUN STARTED ==========
-  2024-02-15 04:00:01 - Run Type: cron
-  2024-02-15 04:00:01 - Timestamp: 2024-02-15 04:00:01
-  2024-02-15 04:00:01 - Backup Name: backup_20240215_040001-1.tar.gz
-
-    [Backup Creation]
-        2024-02-15 04:00:02 - Starting backup creation...
-        2024-02-15 04:00:05 - Backup tar created successfully.
-
-    [Comparison]
-        2024-02-15 04:00:06 - Comparing with latest backup: backup_20240214_040000-1.tar.gz
-        2024-02-15 04:00:10 - FILE: /home/pi/Docker/docker-compose.yml
-        2024-02-15 04:00:10 - DIFFERENCE: Content changed between old and new backup
-< OLD:     image: nginx:1.20
-> NEW:     image: nginx:1.21
-< OLD:       - "8080:80"
-> NEW:       - "8081:80"
-
-        2024-02-15 04:00:11 - INFO: Backup tagged as: LOGDIFF
-        2024-02-15 04:00:11 - Changes detected between:
-        2024-02-15 04:00:11 -   New: /path/to/backup_20240215_040001-1.tar.gz
-        2024-02-15 04:00:11 -   Previous: backup_20240214_040000-1.tar.gz
-
-    [Transfer]
-        2024-02-15 04:00:15 - INFO: Backup copied to /media/G-Drive/backup/cerebro/raspberrypi/backup_20240215_040001-1.tar.gz via rsync.
-        2024-02-15 04:00:20 - INFO: Backup copied to /mnt/nas/backup/cerebro/raspberrypi/backup_20240215_040001-1.tar.gz via rsync.
-
-    [Cleanup]
-        2024-02-15 04:00:21 - INFO: Backup removed from /path/to/cerebro/backups/backup_20240215_040001-1.tar.gz
-
-    [Tar Removal]
-        2024-02-15 04:00:21 - Removed backup_20240214_100000-2.tar.gz from /media/G-Drive/backup/cerebro/raspberrypi.
-        2024-02-15 04:00:21 - Removed backup_20240214_100000-2.tar.gz from /mnt/nas/backup/cerebro/raspberrypi.
-
-========== BACKUP RUN ENDED ==========
+2026-02-15 04:00:01 - [INFO] ========== BACKUP RUN STARTED ==========
+2026-02-15 04:00:01 - [INFO] Run Type: cron
+2026-02-15 04:00:01 - [INFO] Timestamp: 2026-02-15 04:00:01
+2026-02-15 04:00:01 - [INFO] Backup Name: backup_20260215_040001-1.tar.gz
+2026-02-15 04:00:01 - [Sync Destinations] Synced backups from /media/G-Drive/backup/cerebro/raspberrypi to all destinations.
+2026-02-15 04:00:02 - [Backup Creation] Starting backup creation...
+2026-02-15 04:00:05 - [Backup Creation] Tar file created: /home/pi/Apps/cerebro/backups/backup_20260215_040001-1.tar.gz
+2026-02-15 04:00:10 - [Comparison] [MOD] /home/pi/Docker/docker-compose.yml
+2026-02-15 04:00:10 - [Comparison] [-] 'image: nginx:1.20'
+2026-02-15 04:00:10 - [Comparison] [+] 'image: nginx:1.21'
+2026-02-15 04:00:10 - [Comparison] [-] '- "8080:80"'
+2026-02-15 04:00:10 - [Comparison] [+] '- "8081:80"'
+2026-02-15 04:00:11 - [Comparison] [META] Backup tagged as: LOGDIFF
+2026-02-15 04:00:11 - [Comparison] [META] Changes detected between:
+2026-02-15 04:00:11 - [Comparison] [META] New: /home/pi/Apps/cerebro/backups/backup_20260215_040001-1.tar.gz
+2026-02-15 04:00:11 - [Comparison] [META] Previous: /mnt/nas/backup/cerebro/raspberrypi/backup_20260214_040000-1.tar.gz
+2026-02-15 04:00:12 - [Verification] Tar file verified successfully.
+2026-02-15 04:00:12 - [Verification] Backup created: /home/pi/Apps/cerebro/backups/backup_20260215_040001-1.tar.gz
+2026-02-15 04:00:15 - [Transfer] Backup copied to /media/G-Drive/backup/cerebro/raspberrypi/backup_20260215_040001-1.tar.gz via rsync.
+2026-02-15 04:00:20 - [Transfer] Backup copied to /mnt/nas/backup/cerebro/raspberrypi/backup_20260215_040001-1.tar.gz via rsync.
+2026-02-15 04:00:21 - [Cleanup] Backup removed from /home/pi/Apps/cerebro/backups/backup_20260215_040001-1.tar.gz
+2026-02-15 04:00:21 - [Tar Removal] Removed backup_20260214_100000-2.tar.gz from /media/G-Drive/backup/cerebro/raspberrypi.
+2026-02-15 04:00:21 - [Tar Removal] Removed backup_20260214_100000-2.tar.gz from /mnt/nas/backup/cerebro/raspberrypi.
+2026-02-15 04:00:21 - [INFO] ========== BACKUP RUN ENDED ==========
 ```
 
 **Key takeaways:**
