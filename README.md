@@ -315,16 +315,33 @@ Only the timestamped log entries. The current run's log header is always kept.
 
 ### `[HOOKS]` (Command Hooks)
 
-**Configure commands to execute before and after the backup process.**
+**Execute custom scripts or commands before and after the backup process.**
+
+This section allows you to orchestrate system state changes around your backup execution. It is particularly powerful for ensuring **application consistency** (e.g. freezing databases or stopping containers) before archiving files.
 
 ```ini
 [HOOKS]
-PRE_BACKUP_CMD=echo "Starting backup..."
-POST_BACKUP_CMD=echo "Backup complete!"
+# Command to run before backup creation
+PRE_BACKUP_CMD=docker-compose -f /home/pi/Docker/docker-compose.yml down
+
+# Command to run after backup completes (or on script termination)
+POST_BACKUP_CMD=docker-compose -f /home/pi/Docker/docker-compose.yml up -d
 ```
 
-- **`PRE_BACKUP_CMD`**: A command line shell string executed before the backup creation starts. If the command fails (returns a non-zero exit status), Cerebro logs the error and aborts immediately.
-- **`POST_BACKUP_CMD`**: A command line shell string executed on exit (via the EXIT trap). If it fails, a warning is logged but cleanup operations continue.
+#### How it works:
+
+*   **`PRE_BACKUP_CMD` (Pre-Backup Hook):**
+    *   Runs immediately before the backup creation starts.
+    *   **Fail-Fast Design:** If the command fails (returns a non-zero exit status), Cerebro logs the failure and **aborts immediately** without modifying your existing backups or staging files.
+*   **`POST_BACKUP_CMD` (Post-Backup Hook):**
+    *   Runs when the script exits.
+    *   **Guaranteed Execution:** This command is bound to the script's `EXIT` trap. Even if the backup fails, the connection check times out, or the script is terminated, the post-backup hook is **guaranteed to run**. This ensures services (like Docker stacks or databases) are never left stopped or frozen.
+
+#### Common Use Cases:
+
+*   **Database Consistent Backups:** Lock database tables or dump a transaction log before archiving, then unlock/resume the database.
+*   **Docker Container Backups:** Stop active containers (`docker stop` or `docker-compose down`) to release file locks on volumes, then restart them (`docker start` or `docker-compose up -d`).
+*   **Notifications:** Send a web-hook or email alert on backup completion.
 
 ---
 
