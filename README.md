@@ -1,6 +1,6 @@
 # Cerebro: Intelligent Differential Backup & State Monitoring
 
-> **Version:** v3.0  
+> **Version:** v3.2  
 > **Core Philosophy:** "Read, Understand, Verify."
 
 ## 1. What is Cerebro?
@@ -312,6 +312,19 @@ Only the timestamped log entries. The current run's log header is always kept.
 - High-frequency backups (< 1 hour): `DISCARD_MAX_AGE_DAYS=1`
 - Daily backups: `DISCARD_MAX_AGE_DAYS=30`
 - Weekly backups: `DISCARD_MAX_AGE_DAYS=365`
+
+### `[HOOKS]` (Command Hooks)
+
+**Configure commands to execute before and after the backup process.**
+
+```ini
+[HOOKS]
+PRE_BACKUP_CMD=echo "Starting backup..."
+POST_BACKUP_CMD=echo "Backup complete!"
+```
+
+- **`PRE_BACKUP_CMD`**: A command line shell string executed before the backup creation starts. If the command fails (returns a non-zero exit status), Cerebro logs the error and aborts immediately.
+- **`POST_BACKUP_CMD`**: A command line shell string executed on exit (via the EXIT trap). If it fails, a warning is logged but cleanup operations continue.
 
 ---
 

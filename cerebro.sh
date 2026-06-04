@@ -1,11 +1,11 @@
 #!/bin/bash
-# Cerebro v3.0 - Custom Backup Solution
+# Cerebro v3.2 - Custom Backup Solution
 # Copyright (c) 2026 Arelius-D | MIT License
 set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0" .sh)
 SCRIPT_TITLE="Custom Backup Solution for Files and Folders"
-CODE_VERSION="v3.0"
+CODE_VERSION="v3.2"
 SCRIPT_DIR="${SCRIPT_DIR:-$(dirname "$(realpath "$0")")}"
 SCRIPT_FILE_NAME="$SCRIPT_NAME.sh"
 ASSETS_DIR="$SCRIPT_DIR/assets"
@@ -17,6 +17,8 @@ HOSTNAME=$(hostname)
 declare -A nolog_changes
 active_destinations=()
 destinations_checked=0
+PRE_BACKUP_CMD=""
+POST_BACKUP_CMD=""
 
 CURRENT_LOG_SECTION="INFO"
 
@@ -181,6 +183,13 @@ parse_rules() {
                 logprune_discard_max_age_days="${BASH_REMATCH[1]}"
             fi
             ;;
+        HOOKS)
+            if [[ "$line" =~ ^PRE_BACKUP_CMD=(.*)$ ]]; then
+                PRE_BACKUP_CMD="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^POST_BACKUP_CMD=(.*)$ ]]; then
+                POST_BACKUP_CMD="${BASH_REMATCH[1]}"
+            fi
+            ;;
         esac
     done <"$CONFIG"
 
@@ -244,6 +253,11 @@ is_destination_responsive() {
                 exit 2
             fi
 
+            if [ ! -w "$check_path" ]; then
+                echo 3 >"$status_file"
+                exit 3
+            fi
+
             if timeout "$conn_timeout" ls -d "$check_path" >/dev/null 2>&1 </dev/null; then
                 echo 0 >"$status_file"
                 exit 0
@@ -273,11 +287,7 @@ is_destination_responsive() {
     fi
     rm -f "$status_file"
 
-    if [ "$exit_code" -eq 0 ]; then
-        return 0
-    else
-        return 1
-    fi
+    return "$exit_code"
 }
 
 get_active_destinations() {
@@ -286,11 +296,19 @@ get_active_destinations() {
     fi
     active_destinations=()
     for dest in "${destinations[@]}"; do
-        if is_destination_responsive "$dest"; then
+        local status=0
+        is_destination_responsive "$dest" || status=$?
+        if [ $status -eq 0 ]; then
             active_destinations+=("$dest")
         else
-            log_message "WARNING: Destination $dest is unresponsive or offline, skipping."
-            echo "WARNING: Destination $dest is unresponsive or offline, skipping."
+            local reason="unresponsive or offline"
+            if [ $status -eq 3 ]; then
+                reason="permission denied (not writable)"
+            elif [ $status -eq 2 ]; then
+                reason="path not found"
+            fi
+            log_message "WARNING: Destination $dest is $reason, skipping."
+            echo "WARNING: Destination $dest is $reason, skipping."
         fi
     done
     destinations_checked=1
@@ -667,10 +685,18 @@ sync_destinations() {
     local timeout_limit="${RSYNC_TIMEOUT_LIMIT:-300}"
     local valid_dests=()
     for dest in "${active_destinations[@]}"; do
-        if is_destination_responsive "$dest"; then
+        local status=0
+        is_destination_responsive "$dest" || status=$?
+        if [ $status -eq 0 ]; then
             valid_dests+=("$dest")
         else
-            log_message "WARNING: Destination $dest is unresponsive, skipping sync checks."
+            local reason="unresponsive"
+            if [ $status -eq 3 ]; then
+                reason="permission denied (not writable)"
+            elif [ $status -eq 2 ]; then
+                reason="path not found"
+            fi
+            log_message "WARNING: Destination $dest is $reason, skipping sync checks."
         fi
     done
     active_destinations=("${valid_dests[@]}")
@@ -751,7 +777,9 @@ compare_tars() {
 
     local valid_dests=()
     for dest in "${active_destinations[@]}"; do
-        if is_destination_responsive "$dest"; then
+        local status=0
+        is_destination_responsive "$dest" || status=$?
+        if [ $status -eq 0 ]; then
             valid_dests+=("$dest")
         fi
     done
@@ -1047,9 +1075,17 @@ move_backup() {
     log_message "[Transfer]"
     get_active_destinations
     for dest in "${active_destinations[@]}"; do
-        if ! is_destination_responsive "$dest"; then
-            log_message "WARNING: Destination $dest became unresponsive, skipping transfer."
-            echo "WARNING: Destination $dest became unresponsive, skipping transfer."
+        local status=0
+        is_destination_responsive "$dest" || status=$?
+        if [ $status -ne 0 ]; then
+            local reason="unresponsive"
+            if [ $status -eq 3 ]; then
+                reason="permission denied (not writable)"
+            elif [ $status -eq 2 ]; then
+                reason="path not found"
+            fi
+            log_message "WARNING: Destination $dest became $reason, skipping transfer."
+            echo "WARNING: Destination $dest became $reason, skipping transfer."
             local new_active=()
             for ad in "${active_destinations[@]}"; do
                 [ "$ad" != "$dest" ] && new_active+=("$ad")
@@ -1177,6 +1213,35 @@ wait_for_background() {
     return 0
 }
 
+execute_pre_backup_cmd() {
+    if [ -n "${PRE_BACKUP_CMD:-}" ]; then
+        log_message "[Hooks]"
+        log_message "Executing pre-backup command: $PRE_BACKUP_CMD"
+        local cmd_err
+        if ! cmd_err=$(eval "$PRE_BACKUP_CMD" 2>&1); then
+            log_message "ERROR: Pre-backup command failed: $cmd_err"
+            echo "ERROR: Pre-backup command failed: $cmd_err"
+            exit 1
+        fi
+        log_message "Pre-backup command executed successfully."
+    fi
+}
+
+execute_post_backup_cmd() {
+    if [ -n "${POST_BACKUP_CMD:-}" ]; then
+        log_message "[Hooks]"
+        log_message "Executing post-backup command: $POST_BACKUP_CMD"
+        local cmd_err
+        if ! cmd_err=$(eval "$POST_BACKUP_CMD" 2>&1); then
+            log_message "WARNING: Post-backup command failed: $cmd_err"
+            echo "WARNING: Post-backup command failed: $cmd_err"
+            return 1
+        fi
+        log_message "Post-backup command executed successfully."
+    fi
+    return 0
+}
+
 main() {
     LOCK_FILE="/tmp/$SCRIPT_NAME.lock"
     TEMP_LOG="/tmp/$SCRIPT_NAME-temp.log"
@@ -1204,7 +1269,7 @@ main() {
         echo "[ERROR] Failed to create lock file $LOCK_FILE"
         exit 1
     }
-    trap 'wait_for_background || true; rm -f "$LOCK_FILE" || true; log_message "DEBUG: Executing main EXIT trap"; log_message "========== BACKUP RUN ENDED ==========" || true; sync || true; rm -f "$TEMP_LOG" || true' EXIT
+    trap 'wait_for_background || true; execute_post_backup_cmd || true; rm -f "$LOCK_FILE" || true; log_message "DEBUG: Executing main EXIT trap"; log_message "========== BACKUP RUN ENDED ==========" || true; sync || true; rm -f "$TEMP_LOG" || true' EXIT
     echo "$SCRIPT_TITLE $SCRIPT_FILE_NAME $CODE_VERSION"
     if ! parse_rules; then
         log_message "ERROR: parse_rules failed."
@@ -1220,6 +1285,7 @@ main() {
     log_message "Run Type: $BACKUP_TYPE"
     log_message "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
     log_message "Backup Name: $BACKUP_NAME"
+    execute_pre_backup_cmd
     if ! touch "$LOG_FILE"; then
         echo "ERROR: Failed to create or touch $LOG_FILE" >>"$TEMP_LOG"
         echo "[ERROR] Failed to create or touch $LOG_FILE"
