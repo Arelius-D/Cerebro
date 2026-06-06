@@ -531,7 +531,7 @@ Every 5 minutes, Cerebro checks critical system files. If someone adds an SSH ke
 ```
 2026-02-15 04:00:01 - [INFO] ========== BACKUP RUN STARTED ==========
 2026-02-15 04:00:01 - [INFO] Run Type: cron
-2026-02-15 04:00:01 - [INFO] Timestamp: 2026-02-15 04:00:01
+2026-02-15 04:00:01 - [INFO] Version: v3.2
 2026-02-15 04:00:01 - [INFO] Backup Name: backup_20260215_040001-1.tar.gz
 2026-02-15 04:00:01 - [Sync Destinations] Synced backups from /media/G-Drive/backup/cerebro/raspberrypi to all destinations.
 2026-02-15 04:00:02 - [Backup Creation] Starting backup creation...

@@ -1123,6 +1123,7 @@ move_backup() {
 }
 
 setup_cron_job() {
+    log_message "[INFO]"
     local script_path="$SCRIPT_DIR/$SCRIPT_FILE_NAME"
     local cron_command="/bin/bash \"$script_path\" --update >> \"$LOG_FILE\" 2>&1"
     local cron_entry="$cron_schedule $cron_command"
@@ -1270,7 +1271,9 @@ main() {
         exit 1
     }
     trap 'wait_for_background || true; execute_post_backup_cmd || true; rm -f "$LOCK_FILE" || true; log_message "DEBUG: Executing main EXIT trap"; log_message "========== BACKUP RUN ENDED ==========" || true; sync || true; rm -f "$TEMP_LOG" || true' EXIT
-    echo "$SCRIPT_TITLE $SCRIPT_FILE_NAME $CODE_VERSION"
+    if [ -t 1 ]; then
+        echo "$SCRIPT_TITLE $SCRIPT_FILE_NAME $CODE_VERSION"
+    fi
     if ! parse_rules; then
         log_message "ERROR: parse_rules failed."
         exit 1
@@ -1283,7 +1286,7 @@ main() {
     prune_log_file
     log_message "========== BACKUP RUN STARTED =========="
     log_message "Run Type: $BACKUP_TYPE"
-    log_message "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+    log_message "Version: $CODE_VERSION"
     log_message "Backup Name: $BACKUP_NAME"
     execute_pre_backup_cmd
     if ! touch "$LOG_FILE"; then
