@@ -1,12 +1,12 @@
 #!/bin/bash
-# Cerebro Recall Utility v1.0
+# Cerebro Recall Utility v1.1
 # Copyright (c) 2026 Arelius-D | MIT License
 # Extraction and Restoration Tool for the Cerebro Suite
 set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0" .sh)
 SCRIPT_TITLE="Cerebro Recall Utility"
-CODE_VERSION="v1.0"
+CODE_VERSION="v1.1"
 SCRIPT_DIR="${SCRIPT_DIR:-$(dirname "$(realpath "$0")")}"
 CONFIG="$SCRIPT_DIR/cerebro.cfg"
 ASSETS_DIR="$SCRIPT_DIR/assets"
@@ -39,7 +39,8 @@ show_help() {
     echo "Usage: ./$SCRIPT_NAME.sh [OPTIONS] <search_term_1> [search_term_2] ..."
     echo ""
     echo "Options:"
-    echo "  -h, --help    Show this help message and exit"
+    echo "  -h, --help      Show this help message and exit"
+    echo "  -b, --backup    Specify a custom backup tarball archive as the source"
     echo ""
     echo "Examples:"
     echo "  1. Extract a single file:"
@@ -55,27 +56,45 @@ show_help() {
     echo "     ./$SCRIPT_NAME.sh Apps/tutor/ docker-compose.yml"
     echo ""
     echo "Details:"
-    echo "  - The script automatically locates the latest valid Cerebro backup."
+    echo "  - By default, the script automatically locates the latest valid Cerebro backup."
     echo "  - It uses a fuzzy search. If multiple files match a term, you will be prompted to select the correct one."
     echo "  - Extracted files are safely placed in their original absolute paths with a '.bak' extension to prevent accidental overwrites."
     echo "================================================================"
 }
 
-if [ $# -eq 0 ]; then
-    show_help
-    exit 0
-fi
+CUSTOM_BACKUP=""
+search_terms=()
 
-for arg in "$@"; do
-    case "$arg" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         -h|--help)
             show_help
             exit 0
             ;;
+        -b|--backup)
+            if [[ -z "${2:-}" ]]; then
+                echo "[ERROR] Option $1 requires a backup file argument." >&2
+                exit 1
+            fi
+            CUSTOM_BACKUP="$2"
+            shift 2
+            ;;
+        -*)
+            echo "[ERROR] Unknown option: $1" >&2
+            show_help
+            exit 1
+            ;;
+        *)
+            search_terms+=("$1")
+            shift
+            ;;
     esac
 done
 
-search_terms=("$@")
+if [ ${#search_terms[@]} -eq 0 ]; then
+    show_help
+    exit 0
+fi
 
 touch "$LOG_FILE"
 log_message "========== RECALL SESSION STARTED =========="
@@ -101,27 +120,39 @@ else
 fi
 
 latest_backup=""
-metadata_file="$ASSETS_DIR/.tar_meta_data.txt"
-
-find_args=()
-for dest in "${destinations[@]}"; do
-    if [ -d "$dest" ]; then
-        find_args+=("$dest")
+if [ -n "$CUSTOM_BACKUP" ]; then
+    if [ -f "$CUSTOM_BACKUP" ]; then
+        latest_backup="$CUSTOM_BACKUP"
+    else
+        log_message "[ERROR] Specified backup file does not exist: $CUSTOM_BACKUP"
+        log_message "========== RECALL SESSION ENDED =========="
+        exit 1
     fi
-done
-
-if [ ${#find_args[@]} -gt 0 ]; then
-    latest_backup=$(find "${find_args[@]}" -maxdepth 1 -name "*.tar.gz" -printf "%T@ %p\n" 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)
 fi
 
-if [ -z "$latest_backup" ] && [ -f "$metadata_file" ]; then
-    latest_file=$(tail -n 1 "$metadata_file" | cut -d: -f1)
+metadata_file="$ASSETS_DIR/.tar_meta_data.txt"
+
+if [ -z "$latest_backup" ]; then
+    find_args=()
     for dest in "${destinations[@]}"; do
-        if [ -f "$dest/$latest_file" ]; then
-            latest_backup="$dest/$latest_file"
-            break
+        if [ -d "$dest" ]; then
+            find_args+=("$dest")
         fi
     done
+
+    if [ ${#find_args[@]} -gt 0 ]; then
+        latest_backup=$(find "${find_args[@]}" -maxdepth 1 -name "*.tar.gz" -printf "%T@ %p\n" 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)
+    fi
+
+    if [ -z "$latest_backup" ] && [ -f "$metadata_file" ]; then
+        latest_file=$(tail -n 1 "$metadata_file" | cut -d: -f1)
+        for dest in "${destinations[@]}"; do
+            if [ -f "$dest/$latest_file" ]; then
+                latest_backup="$dest/$latest_file"
+                break
+            fi
+        done
+    fi
 fi
 
 if [ -z "$latest_backup" ]; then
@@ -195,7 +226,6 @@ temp_dir=$(mktemp -d)
 trap 'rm -rf "$temp_dir"' EXIT
 
 for term in "${search_terms[@]}"; do
-    log_message ""
     log_message "[INFO] Processing search term: '$term'"
 
     if [[ "$term" == */ ]]; then
@@ -269,7 +299,6 @@ for term in "${search_terms[@]}"; do
     fi
 done
 
-log_message ""
 log_message "========== RECALL SESSION ENDED =========="
 sync
 exit 0

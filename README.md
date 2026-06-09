@@ -636,6 +636,7 @@ grep "docker-compose.yml" cerebro.log
 - **Folder-aware** — append a trailing slash to extract an entire directory tree
 - **Multi-term** — restore multiple files or folders in a single call
 - **Multi-destination aware** — searches across all your configured `[DESTINATIONS]` for the latest valid backup
+- **Specific backup targeting** — specify a custom backup archive manually with `-b` / `--backup` to bypass auto-discovery and restore files from any historical snapshot
 
 ### Installation
 
@@ -648,8 +649,12 @@ chmod +x recall.sh
 ### Usage
 
 ```bash
-./recall.sh [search_term_1] [search_term_2] ...
+./recall.sh [OPTIONS] <search_term_1> [search_term_2] ...
 ```
+
+**Options:**
+* `-h, --help`      Show help message and exit
+* `-b, --backup`    Specify a custom backup tarball archive as the source
 
 ### Examples
 
@@ -673,6 +678,12 @@ chmod +x recall.sh
 ```bash
 ./recall.sh smb.conf rclone.conf
 # Both extracted and placed as .bak files simultaneously
+```
+
+**Restore from a specific backup archive:**
+
+```bash
+./recall.sh -b /mnt/nas/backup/cerebro/raspberrypi/backup_20240215_040000-1.tar.gz etc/samba/smb.conf
 ```
 
 **Restore an entire folder:**
