@@ -1,41 +1,33 @@
-# Cerebro: Intelligent Differential Backup & State Monitoring
+# Cerebro: State-Monitoring Differential Backup Engine
 
-> **Version:** v3.2  
-> **Core Philosophy:** "Read, Understand, Verify."
+> **Version:** v3.3  
+> **Core Philosophy:** "Verify First, Commit Later."
 
-## 1. What is Cerebro?
+## 1. Overview
 
-Cerebro is not a simple "copy-paste" backup script. It is an **intelligent state-monitor** wrapped in a backup utility.
+Cerebro is a state-monitoring backup engine for Linux environments. Unlike simple file replication scripts or standard `tar` cron jobs, Cerebro operates on a verification pipeline: it stages files, inspects content changes against the latest valid archive across multiple destinations, and only commits a new backup if actual content changes are detected.
 
-Unlike standard tools (like `rsync` or simple `tar` cron jobs) that blindly copy data on a schedule, Cerebro operates on a **"Verify First"** architecture. It stages data, compares it against the last known valid state across multiple storage destinations, and _only_ commits a new backup if meaningful changes are detected.
-
-It is designed for complex environments (Self-hosted stacks, Docker containers, System configurations) where you need to distinguish between **critical configuration changes** and **meaningless noise**.
+### Key Architectural Characteristics:
+* **Zero External Dependencies (Offline-First):** Cerebro operates entirely offline. It does not require an internet connection, Git authentication, cloud APIs, or third-party webhooks to track state changes, compute text diffs, maintain metadata, or create backups.
+* **Portable & Self-Contained:** Because the engine runs entirely out of its own directory, it does not modify the global user environment, install system libraries, or rely on shared global state. 
+* **Multi-Instance Isolation:** You can run multiple instances of Cerebro in parallel by placing them in separate directories (e.g., configuring `/opt/cerebro-configs/` and `/opt/cerebro-db/` independently). By simply copying the folder structure and naming the script files uniquely, non-technical users can maintain isolated, specialized backup profiles without managing complex environment variables or shared system locks.
+* **Scalable Monitoring Overhead:** The engine scales dynamically based on configuration. It can run as a zero-overhead, completely hands-off local backup cron job, or scale up to a high-frequency, multi-destination configuration auditor with pre- and post-run service execution hooks.
+* **Target Scenarios:** Designed for environments (such as self-hosted containers, databases, and configuration directories) where you need to distinguish between critical configuration changes and routine runtime file updates.
 
 ---
 
-## 2. Why Use Cerebro? (The Logic)
+## 2. Key Features
 
-Cerebro solves three critical problems inherent in standard backup solutions:
+Cerebro addresses standard backup limitations through three primary mechanisms:
 
-### A. The "Noise" Filter (Smart Change Detection)
+### A. Content-Aware Filtering (Smart Change Detection)
+Instead of relying solely on modification timestamps—which often trigger redundant backups for unchanged files (e.g. rotated log files or database touches)—Cerebro parses content. By combining `[NOLOG]` and `[TARDISCARD]` directives, Cerebro can detect that only temporary files or logs have changed, record the event in the log, and discard the redundant archive, reducing backup storage footprints.
 
-Most backup tools trigger a new archive if a file's timestamp changes. Cerebro inspects the **content**.
+### B. Inline Diff Logging
+Cerebro can log text changes directly to its execution log. By configuring `[LOGDIFF]` rules for text files (such as scripts, `.env` files, or configurations), Cerebro computes unified diffs between the previous backup and the active environment, writing the specific line modifications into `cerebro.log`. This provides a continuous audit history of configurations without requiring manual extraction of archives.
 
-- **The Problem:** A Docker container rotates a log file. A standard backup tool sees a "change" and creates a 2GB duplicate archive.
-- **The Cerebro Solution:** Through the `[NOLOG]` and `[TARDISCARD]` protocols, Cerebro detects that _only_ a log file changed. It can record the event in the system log but **discard the heavy archive**, saving gigabytes of storage over time while keeping your backup timeline clean.
-
-### B. High-Visibility Logging (The "Black Box" Fix)
-
-Standard backups are opaque; you don't know what changed until you restore.
-
-- **The Cerebro Solution:** The `[LOGDIFF]` feature allows you to define text files (scripts, configs, `.env` files). When these change, Cerebro **diffs the content** and writes the specific added/removed lines directly into `cerebro.log`.
-- **Result:** You can read your log file like a commit history, seeing exactly when and how a configuration was altered without ever touching a `.tar.gz` file.
-
-### C. Multi-Destination Sync (Active Redundancy)
-
-Cerebro does not assume a single storage location is available.
-
-- **The Cerebro Solution:** It supports an array of `[DESTINATIONS]`. Before every run, it scans _all_ defined locations (NAS, USB Drives, Cloud Mounts) to find the true "Latest" backup. After a run, it synchronizes the new backup to all healthy destinations, ensuring your off-site and on-site copies are identical.
+### C. Multi-Destination Sync
+Cerebro supports writing backups to multiple storage locations (`[DESTINATIONS]`). Before a backup run, it scans all configured destinations to locate the most recent valid backup. After creating a new backup, it replicates the archive to all active destinations, maintaining target parity.
 
 ---
 
@@ -43,19 +35,21 @@ Cerebro does not assume a single storage location is available.
 
 Cerebro follows a strict execution pipeline to ensure data integrity:
 
-1.  **Staging:** Creates a temporary, isolated environment in `/tmp` for comparison work.
-2.  **Latest Backup Discovery:** Scans ALL `[DESTINATIONS]` to find the most recent valid backup (by timestamp), verifying backup integrity using `timeout tar -tzf` and automatically deleting corrupted archives.
-3.  **Comparison:** Extracts the previous backup and performs a file-by-file diff against live data.
-4.  **Decision Matrix:**
+1.  **Startup Configuration Guard:** Validates configuration rules and verifies that all absolute paths defined in `[CRUCIAL]` are covered by a path in `[INCLUDE]`. If any crucial path is uncovered, aborts immediately.
+2.  **Staging:** Creates a temporary, isolated environment in `/tmp` for comparison work.
+3.  **Latest Backup Discovery:** Scans ALL `[DESTINATIONS]` to find the most recent valid backup (by timestamp), verifying backup integrity using `timeout tar -tzf` and automatically deleting corrupted archives.
+4.  **Comparison:** Extracts the previous backup and performs a file-by-file diff against live data.
+5.  **Decision Matrix:**
+    - _Crucial Deletion:_ If a file in the previous backup matches a pattern in `[CRUCIAL]` and is missing in the new backup, abort execution immediately with code 1, deleting the new tarball (post-backup hooks are executed).
     - _No Change:_ Abort, delete staged tar, log "No changes detected."
-    - _LOGDIFF Change:_ Extract and log the actual text differences, tag backup as `LOGDIFF`.
-    - _NOLOG Change:_ Note the change but don't log content, tag backup as `NOLOG` or `DISCARD` based on rules.
-5.  **Tagging & Metadata:** Create entry in `.tar_meta_data.txt` with backup type (LOGDIFF/NOLOG/DISCARD).
-6.  **Creation:** Build the final `tar.gz` archive with all excludes applied.
-7.  **Verification:** Run `tar -tzf` to ensure the archive is not corrupted.
-8.  **Distribution:** Use `rsync` with timeout to copy the valid archive to all reachable `[DESTINATIONS]`, falling back to direct copying via `cp -ru` if all rsync retry attempts fail.
-9.  **Cleanup:** If `[TARDISCARD] DISCARD=1`, remove old DISCARD-tagged backups. Prune log file if `[LOGPRUNE]` enabled.
-10. **Self-Maintenance:** Update cron job, remove temp files, release lock.
+    - _Meaningful Change (RETAIN):_ If changes are detected in files not covered by `[NOLOG]`, or matching `[LOGDIFF]` (where unified text diffs are written to `cerebro.log`), the backup is tagged as `RETAIN`.
+    - _Routine Change (DISCARD):_ If changes match ONLY `[NOLOG]` patterns, the backup is tagged as `DISCARD:LATEST`.
+6.  **Tagging & Metadata:** Create entry in `.tar_meta_data.txt` with the backup tag (`RETAIN` or `DISCARD:LATEST`).
+7.  **Creation:** Build the final `tar.gz` archive with all excludes applied.
+8.  **Verification:** Run `tar -tzf` to ensure the archive is not corrupted.
+9.  **Distribution:** Use `rsync` with timeout to copy the valid archive to all reachable `[DESTINATIONS]`, falling back to direct copying via `cp -ru` if all rsync retry attempts fail.
+10. **Cleanup:** If `[TARDISCARD] DISCARD=1`, prune old `DISCARD` archives from the destinations. Prune log file if `[LOGPRUNE]` enabled.
+11. **Self-Maintenance:** Update cron job, remove temp files, release lock.
 
 ---
 
@@ -151,27 +145,17 @@ DIFFERENCE: Content changed between old and new backup
 
 ---
 
-### `[TARDISCARD]` (The Storage Saver)
+### `[TARDISCARD]` (Storage Retention Optimization)
 
-**Intelligently prunes backups that only contain noise-level changes.**
+**Prunes archives containing only noise-level changes (triggered by `[NOLOG]` updates).**
 
-- **`DISCARD=0`**: Disabled. All backups are kept.
-- **`DISCARD=1`**: Enabled. "Smart Prune" logic activates.
+- **`DISCARD=0`**: Disabled. Retains all generated backup archives.
+- **`DISCARD=1`**: Enabled. Activates retention optimization logic.
 
-**How it works:**
-When a backup run completes, Cerebro checks the metadata to see WHAT triggered the backup:
-
-1. **If the backup contains LOGDIFF changes** → Keep it (tagged as `LOGDIFF`).
-2. **If the backup contains ONLY NOLOG changes** → Tag it as `DISCARD`.
-3. **On the NEXT run**, if a new backup is created, Cerebro deletes all old `DISCARD`-tagged backups, keeping only the most recent `DISCARD` backup.
-
-**Why this matters:**
-
-- You have a Docker container that writes to a log file every 5 minutes.
-- Without TARDISCARD: You'd have 288 backups per day (one every 5 minutes), all containing the same data except for log rotation.
-- With TARDISCARD: You have 1 backup representing the "last known NOLOG state" and all your meaningful backups (when actual configs changed).
-
-**Storage saved:** In a typical homelab, this can save 80-90% of backup storage over a year.
+#### Execution Logic:
+1. **Meaningful Changes (RETAIN):** If a backup contains modifications that do not match `[NOLOG]` patterns, or matches `[LOGDIFF]` patterns (unified diffs captured), it is preserved and tagged as `RETAIN`.
+2. **Routine Changes Only (DISCARD):** If a backup contains modifications matching only `[NOLOG]` rules, it is tagged as `DISCARD:LATEST`.
+3. **Pruning Cycle:** Upon a successful subsequent run, historical `DISCARD` archives are pruned, leaving only the single most recent archive tagged as `DISCARD:LATEST` alongside the preserved `RETAIN` archives. This ensures that long-term backup history is preserved for code and configuration changes while preventing database updates from consuming excessive storage.
 
 ---
 
@@ -290,7 +274,7 @@ NOFIRSTRUN=0
 
 ### `[LOGPRUNE]` (Log File Management)
 
-**Automatically clean old entries from `cerebro.log`.**
+**Automatically clean old entries from `cerebro.log` without losing configuration audit history.**
 
 ```ini
 [LOGPRUNE]
@@ -298,14 +282,16 @@ ENABLED=1
 DISCARD_MAX_AGE_DAYS=1
 ```
 
-- **`ENABLED=1`**: Active. Cerebro will delete log entries older than the specified age.
-- **`DISCARD_MAX_AGE_DAYS=1`**: Keep only the last 1 day of logs.
+- **`ENABLED=1`**: Active. Cerebro will prune log entries.
+- **`DISCARD_MAX_AGE_DAYS=1`**: Defines the age threshold (in days) for pruning routine logs.
+
+**Smart Retention Logic:**
+Unlike standard log rotation tools that truncate the entire file or delete all historical records, Cerebro uses an intelligent parser:
+- **Pruned:** Only standard run blocks, runs with no changes, and runs containing ONLY `DISCARD`-tagged changes (such as routine database or volume updates) are pruned once they exceed the maximum age.
+- **Preserved:** All run blocks containing unified text diffs and configuration changes (tagged as `RETAIN`) are **preserved forever**. This ensures that your system config audit history is never lost while still keeping disk usage under control.
 
 **Why this exists:**
-If you run Cerebro every 5 minutes with `DEBUG=1`, your log file will grow to gigabytes in a week. This feature keeps the log manageable while retaining recent history.
-
-**What gets deleted:**
-Only the timestamped log entries. The current run's log header is always kept.
+If you run Cerebro frequently with verbose settings, the log file will grow rapidly. This feature prunes the routine change noise while maintaining a permanent version history of configurations.
 
 **Recommendation:**
 
@@ -343,6 +329,35 @@ POST_BACKUP_CMD=docker-compose -f /home/pi/Docker/docker-compose.yml up -d
 *   **Docker Container Backups:** Stop active containers (`docker stop` or `docker-compose down`) to release file locks on volumes, then restart them (`docker start` or `docker-compose up -d`).
 *   **Notifications:** Send a web-hook or email alert on backup completion.
 
+### `[CRUCIAL]` (State Protection Guard)
+
+**Define files and folders that are absolutely essential and must never be lost.**
+
+This section acts as a fail-fast safety check to protect your backup timeline from being corrupted if critical system or application configurations are accidentally deleted on the live system.
+
+```ini
+[CRUCIAL]
+# Exact files that must not be deleted
+/home/user/.ssh/id_rsa
+/etc/nginx/nginx.conf
+/home/user/.config/app/config.ini
+
+# Directory contents (ensures the directory is not empty)
+/home/user/projects/critical-app/*
+```
+
+#### How it works:
+
+1. **Startup Configuration Guard:** 
+   Before running the backup, Cerebro verifies that every path defined under `[CRUCIAL]` is covered by a path in `[INCLUDE]`. If a crucial path is not included in the backup, the run halts immediately with a config error.
+2. **Deletion Abort Check:**
+   During the comparison phase (`compare_tars`), Cerebro compares the previous backup with the newly created backup. If any file present in the previous backup matches a pattern in `[CRUCIAL]` but is missing in the new backup, the run is aborted:
+   - The newly created, incomplete backup tarball is deleted.
+   - The backup run exits with code `1`.
+   - The global `EXIT` trap executes the `POST_BACKUP_CMD` hook to ensure your system services are restarted.
+3. **Intentional Deletions:**
+   If you intentionally delete a crucial file, the backup will fail until you remove its pattern or path from the `[CRUCIAL]` section in `cerebro.cfg`.
+
 ---
 
 ## 5. The Metadata System (Understanding .tar_meta_data.txt)
@@ -352,42 +367,42 @@ Cerebro maintains a hidden metadata file at `$SCRIPT_DIR/assets/.tar_meta_data.t
 **Format:**
 
 ```
-backup_20240215_040000-1.tar.gz:LOGDIFF
-backup_20240215_100000-2.tar.gz:NOLOG
-backup_20240215_160000-3.tar.gz:DISCARD
-backup_20240215_220000-4.tar.gz:DISCARD:LATEST
+backup_20260215_040000-1.tar.gz:RETAIN:FIRST
+backup_20260215_100000-2.tar.gz:RETAIN
+backup_20260215_160000-3.tar.gz:DISCARD
+backup_20260215_220000-4.tar.gz:DISCARD:LATEST
 ```
 
 **Tags:**
 
-- **`LOGDIFF`**: This backup contains changes to files in `[LOGDIFF]`. **Always kept.**
-- **`NOLOG`**: This backup contains changes to files in `[NOLOG]` AND `[LOGDIFF]`. **Always kept.**
-- **`DISCARD`**: This backup contains ONLY `[NOLOG]` changes. **Eligible for deletion.**
+- **`RETAIN`**: This backup contains meaningful changes (e.g. file content differences matching `[LOGDIFF]`, new files, or non-excluded deleted files). **Always kept.**
+- **`RETAIN:FIRST`**: The first backup created on a system (which has no previous backup to compare against). **Always kept.**
+- **`DISCARD`**: This backup contains ONLY changes that matched `[NOLOG]` patterns. **Eligible for deletion.**
 - **`DISCARD:LATEST`**: The most recent DISCARD backup. **Protected until a newer backup is created.**
 
 **TARDISCARD Logic:**
 
 ```
 Current state:
-  backup_001.tar.gz:LOGDIFF
+  backup_001.tar.gz:RETAIN
   backup_002.tar.gz:DISCARD
   backup_003.tar.gz:DISCARD
   backup_004.tar.gz:DISCARD:LATEST
 
 New backup created (backup_005.tar.gz):
-  - If it's LOGDIFF → Delete all DISCARD except LATEST
-  - If it's DISCARD → Promote backup_005 to DISCARD:LATEST, delete backup_002 and backup_003
+  - If it's RETAIN  → Keep it, convert current DISCARD:LATEST to DISCARD, and clean up older DISCARD backups.
+  - If it's DISCARD → Promote backup_005 to DISCARD:LATEST, and delete backup_002 and backup_003.
 
-Result:
-  backup_001.tar.gz:LOGDIFF
+Result (if backup_005 is DISCARD):
+  backup_001.tar.gz:RETAIN
   backup_004.tar.gz:DISCARD
   backup_005.tar.gz:DISCARD:LATEST
 ```
 
 This ensures you always have:
 
-1. All meaningful configuration changes (LOGDIFF/NOLOG)
-2. The two most recent states (current + previous)
+1. All meaningful configuration and code history (RETAIN files)
+2. The two most recent backup states (current + previous)
 
 ---
 
@@ -422,7 +437,9 @@ DISCARD=1
 ```
 
 **Result:**
-You sleep. Cerebro wakes up daily at 4 AM, checks your containers. If nothing changed, it goes back to sleep (no backup created). If an app auto-updated and changed a config, Cerebro snapshots it, logs the version change in `cerebro.log`, syncs it to your NAS, and you can review it in the morning. If just a database file changed, it creates a backup but marks it as DISCARD to save space.
+- If no changes are detected, the backup is skipped.
+- If a configuration file changes, a backup is created, tagged as `RETAIN`, textual differences are logged, and the archive is synced to the NAS.
+- If only database files or volume data change, a backup is created but tagged as `DISCARD:LATEST`, which will be cleaned up on the subsequent run to minimize storage usage.
 
 ---
 
@@ -451,7 +468,10 @@ DISCARD=0
 ```
 
 **Result:**
-Every 30 minutes, Cerebro checks your work. Every time you edit a script, it creates a versioned backup. The `cerebro.log` effectively becomes a "git commit history" showing exactly what code you tweaked, when, and what the diff was. You can trace bugs back to specific edits without needing to remember to commit.
+Cerebro runs every 30 minutes. 
+- Creates a backup only when changes are detected in scripts or codebase.
+- Writes unified code differences directly to `cerebro.log`.
+- Retains all historical backups for granular version tracking.
 
 ---
 
@@ -488,7 +508,10 @@ DISCARD_MAX_AGE_DAYS=7
 ```
 
 **Result:**
-High frequency backups (every 4 hours). Multiple redundant destinations (local RAID + NAS + cloud). If your local drive dies, the NAS copy is up to date. If you accidentally break a config file, you can review `cerebro.log` to see exactly what changed in the last backup, or restore from the previous tar. Log pruning keeps the log file under control.
+Cerebro runs every 4 hours.
+- Replicates backup archives across all configured locations (RAID, NAS, Cloud).
+- If one destination goes offline, Cerebro copies to the remaining active ones.
+- Log pruning automatically trims `cerebro.log` to keep its size managed.
 
 ---
 
@@ -520,7 +543,10 @@ DISCARD=0
 ```
 
 **Result:**
-Every 5 minutes, Cerebro checks critical system files. If someone adds an SSH key, modifies sudoers, or changes user passwords, you'll have a timestamped backup and a full diff of exactly what changed. This is forensics-level monitoring - if your system is compromised, you'll know exactly when and what was altered.
+Cerebro runs every 5 minutes.
+- Monitors critical system configuration directories.
+- Logs immediate warnings and line-level diffs on configuration changes.
+- Retains all archives to maintain a complete history of system changes.
 
 ---
 
@@ -541,7 +567,7 @@ Every 5 minutes, Cerebro checks critical system files. If someone adds an SSH ke
 2026-02-15 04:00:10 - [Comparison] [+] 'image: nginx:1.21'
 2026-02-15 04:00:10 - [Comparison] [-] '- "8080:80"'
 2026-02-15 04:00:10 - [Comparison] [+] '- "8081:80"'
-2026-02-15 04:00:11 - [Comparison] [META] Backup tagged as: LOGDIFF
+2026-02-15 04:00:11 - [Comparison] [META] Backup tagged as: RETAIN
 2026-02-15 04:00:11 - [Comparison] [META] Changes detected between:
 2026-02-15 04:00:11 - [Comparison] [META] New: /home/pi/Apps/cerebro/backups/backup_20260215_040001-1.tar.gz
 2026-02-15 04:00:11 - [Comparison] [META] Previous: /mnt/nas/backup/cerebro/raspberrypi/backup_20260214_040000-1.tar.gz
@@ -620,23 +646,23 @@ grep "docker-compose.yml" cerebro.log
 
 ---
 
-## 9. Recall — Smart Restore Extension
+## 9. Recall — Restore Utility
 
-> **Recall is an optional companion utility for Cerebro.** Everything in section 8 works without it. Recall is for when you want a faster, safer, and more human-friendly recovery experience.
+> **Recall is a companion recovery utility for Cerebro.** All recovery operations in Section 8 can be performed manually. Recall automates search, path construction, and extraction.
 
-### What is Recall?
+### Functional Overview
 
-`recall.sh` is a dedicated extraction and restoration tool for the Cerebro backup suite. Rather than manually identifying the correct `.tar.gz`, extracting with the correct relative path, and copying the file back — Recall does all of that in a single command.
+`recall.sh` is a CLI extraction utility that reads `cerebro.cfg` to search and extract target files or directories from the latest backup across all configured destinations.
 
-**Key behaviours:**
+**Key Features:**
 
-- Reads your `cerebro.cfg` automatically — knows your destinations, finds the latest backup itself
-- **Fuzzy search with disambiguation** — find a file by name fragment. If multiple matches exist, you get an interactive selector
-- **Safe extraction by default** — files are always placed at `.bak` paths (e.g. `smb.conf.bak`) so you can inspect before committing. No live file is ever silently overwritten
-- **Folder-aware** — append a trailing slash to extract an entire directory tree
-- **Multi-term** — restore multiple files or folders in a single call
-- **Multi-destination aware** — searches across all your configured `[DESTINATIONS]` for the latest valid backup
-- **Specific backup targeting** — specify a custom backup archive manually with `-b` / `--backup` to bypass auto-discovery and restore files from any historical snapshot
+- **Automatic Configuration Reading:** Resolves backup destinations and targets the latest valid archive automatically.
+- **Fuzzy Search with Disambiguation:** Searches for files using partial names. If multiple matches exist, it presents an interactive selector.
+- **Safe Extraction:** To prevent accidental overwrites of active files, extracted files are placed at `.bak` paths (e.g., `smb.conf.bak`).
+- **Directory Extraction:** Appending a trailing slash to the search term extracts the entire directory tree (renamed with a `_bak` suffix).
+- **Multi-term Queries:** Restores multiple files or folders in a single command execution.
+- **Multi-Destination Scanning:** Scans all active `[DESTINATIONS]` to locate the most recent valid backup.
+- **Targeted Restores:** Bypasses auto-discovery when the `-b` / `--backup` option is specified, extracting files from a targeted archive.
 
 ### Installation
 
@@ -704,9 +730,9 @@ chmod +x recall.sh
 # Select the file to extract for 'compose' (or Cancel):
 ```
 
-### Recommended Workflow: Review Before Applying
+### Recommended Recovery Workflow
 
-The `.bak` convention is intentional — it gives you a chance to diff before you commit:
+Because extracted files are saved with a `.bak` suffix, you can inspect differences before applying the restored version:
 
 ```bash
 # Extract
@@ -817,13 +843,20 @@ nano cerebro.cfg
 ./cerebro.sh
 ```
 
+> [!IMPORTANT]
+> **Must be Run Manually First:** The first run of Cerebro on a new system must be executed manually from a terminal without any flags (specifically **no** `--update` flag). This manual execution is required because:
+> 1. It performs the interactive dependency check and offers to install missing tools (under headless/cron runs, this interactive prompting fails).
+> 2. It initializes the local folder structure (`assets/` and `backups/`).
+> 3. It generates the initial `RETAIN:FIRST` backup reference to start tracking file states.
+> 4. It installs the automated cron job on the system.
+
 **What happens on first run:**
 
 - Cerebro checks for required tools, offers to install if missing
 - Reads `cerebro.cfg`
 - Creates the `backups/` directory
 - Creates the `assets/` directory for metadata
-- Since there's no previous backup, it creates the first one and tags it as `LOGDIFF`
+- Since there's no previous backup, it creates the first one and tags it as `RETAIN:FIRST`
 - Installs the cron job (if `cron=1` in config)
 - Logs to `cerebro.log`
 
@@ -907,7 +940,7 @@ This simulates a cron-triggered run.
 - 6 log file changes per day (NOLOG events)
 
 **Without TARDISCARD:** 7 backups/week × 10GB = 70GB/week = 3.6TB/year  
-**With TARDISCARD:** 1 LOGDIFF backup/week × 10GB + 1 DISCARD backup = 20GB/week = 1TB/year
+**With TARDISCARD:** 1 RETAIN backup/week × 10GB + 1 DISCARD:LATEST backup = 20GB/week = 1TB/year
 
 ### Network Considerations
 
@@ -987,7 +1020,7 @@ tail -f cerebro.log
 
 ### Q: I accidentally deleted my metadata file (.tar_meta_data.txt). What happens?
 
-**A:** Cerebro will rebuild it on the next run. You'll lose the LOGDIFF/NOLOG/DISCARD tags, so TARDISCARD won't work correctly until new backups are created. Your actual backup data is unaffected.
+**A:** Cerebro will rebuild it on the next run. You'll lose the RETAIN/DISCARD tags, so TARDISCARD won't work correctly until new backups are created. Your actual backup data is unaffected.
 
 ### Q: I see "tar: file changed as we read it" warnings.
 
@@ -1016,7 +1049,11 @@ tail -f cerebro.log
 
 ### Q: What happens if I run Cerebro while another instance is running?
 
-**A:** The second instance will detect the lock file (`/tmp/cerebro.lock`) and exit immediately with an error message. This prevents corruption from concurrent backups.
+**A:** The second instance will detect the lock file (`/tmp/$SCRIPT_NAME.lock`) and exit immediately to prevent data corruption. 
+
+Cerebro handles this with two robust mechanisms:
+1. **Self-Healing Stale Lock Recovery:** If a crash or reboot occurs, the lock file remains but the PID inside it will be inactive. Cerebro automatically checks this at startup using `ps -p "$pid"`. If the PID is dead, it logs a warning, cleans up the stale lock file, and runs the backup.
+2. **Multi-Instance Isolation via Renaming:** The lock file name is derived dynamically from the script file name (`/tmp/$SCRIPT_NAME.lock`). To run multiple instances in parallel on the same system, simply rename the main script file to match its task (e.g. rename it to `cerebro-docker.sh` in one directory and `cerebro-dev.sh` in another). Their lock files will be isolated automatically to `/tmp/cerebro-docker.lock` and `/tmp/cerebro-dev.lock` without any code modifications.
 
 ### Q: How do I move Cerebro to a different directory on the same system?
 
@@ -1044,10 +1081,10 @@ Pipe Cerebro's output to a mail command in your cron job:
 
 ### Integration with Monitoring Systems
 
-Parse `cerebro.log` for the string `"Backup tagged as: LOGDIFF"` to trigger alerts:
+Parse `cerebro.log` for the string `"Backup tagged as: RETAIN"` to trigger alerts:
 
 ```bash
-if grep -q "Backup tagged as: LOGDIFF" cerebro.log; then
+if grep -q "Backup tagged as: RETAIN" cerebro.log; then
     curl -X POST https://monitoring.example.com/webhook -d "Critical config changed"
 fi
 ```

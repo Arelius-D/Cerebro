@@ -1,11 +1,11 @@
 #!/bin/bash
-# Cerebro v3.2 - Custom Backup Solution
+# Cerebro v3.3 - Custom Backup Solution
 # Copyright (c) 2026 Arelius-D | MIT License
 set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0" .sh)
 SCRIPT_TITLE="Custom Backup Solution for Files and Folders"
-CODE_VERSION="v3.2"
+CODE_VERSION="v3.3"
 SCRIPT_DIR="${SCRIPT_DIR:-$(dirname "$(realpath "$0")")}"
 SCRIPT_FILE_NAME="$SCRIPT_NAME.sh"
 ASSETS_DIR="$SCRIPT_DIR/assets"
@@ -108,6 +108,7 @@ parse_rules() {
     ignores=()
     logdiffs=()
     nologs=()
+    crucial_items=()
     destinations=()
     cron_enabled=0
     cron_schedule=""
@@ -142,6 +143,9 @@ parse_rules() {
             ;;
         NOLOG)
             [[ -n "$line" ]] && nologs+=("$line")
+            ;;
+        CRUCIAL)
+            [[ -n "$line" ]] && crucial_items+=("$line")
             ;;
         DESTINATIONS)
             [[ -n "$line" ]] && destinations+=("${line%/}/$HOSTNAME")
@@ -229,6 +233,48 @@ matches_pattern() {
         return 1
         ;;
     esac
+}
+
+is_crucial_match() {
+    local path="$1"
+    local pattern="$2"
+
+    if matches_pattern "$path" "$pattern"; then
+        return 0
+    fi
+
+    if [[ "$path" == "$pattern"/* ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+check_crucial_configuration() {
+    local invalid_config=0
+
+    for crucial in "${crucial_items[@]}"; do
+        if [[ "$crucial" == /* ]]; then
+            local covered=0
+            for inc in "${items[@]}"; do
+                if [ "$crucial" = "$inc" ] || [[ "$crucial" == "$inc"/* ]]; then
+                    covered=1
+                    break
+                fi
+            done
+
+            if [ $covered -eq 0 ]; then
+                echo "[CONFIG ERROR] Crucial path '$crucial' is not covered by any path in [INCLUDE]!"
+                log_message "ERROR: Crucial path '$crucial' is not covered by [INCLUDE]."
+                invalid_config=1
+            fi
+        fi
+    done
+
+    if [ $invalid_config -eq 1 ]; then
+        echo "[CONFIG ERROR] Please correct your cerebro.cfg. Aborting."
+        exit 1
+    fi
 }
 
 is_destination_responsive() {
@@ -511,7 +557,7 @@ prune_log_file() {
         }
 
         if (full_block ~ /Backup tagged as: DISCARD/) {
-            if (match(full_block, /Timestamp: ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})/, arr)) {
+            if (match(full_block, /^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})/, arr)) {
                 run_date_str = arr[1]
                 gsub(/[-:]/, " ", run_date_str)
                 run_timestamp = mktime(run_date_str)
@@ -525,7 +571,7 @@ prune_log_file() {
             next
         }
 
-        if (match(full_block, /Timestamp: ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})/, arr)) {
+        if (match(full_block, /^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})/, arr)) {
             run_date_str = arr[1]
             gsub(/[-:]/, " ", run_date_str)
             run_timestamp = mktime(run_date_str)
@@ -868,6 +914,7 @@ compare_tars() {
 
     local has_changes=0
     local retain_changes=0
+    local crucial_deletions=()
     nolog_changes=()
 
     while IFS= read -r -d '' new_file; do
@@ -970,6 +1017,11 @@ compare_tars() {
                 log_message "[DEL] $source_path"
                 retain_changes=1
             fi
+            for pattern in "${crucial_items[@]}"; do
+                if is_crucial_match "$source_path" "$pattern"; then
+                    crucial_deletions+=("$source_path (matched: $pattern)")
+                fi
+            done
         fi
     done < <(find "$old_temp_dir" -type f -print0 2>>"$LOG_FILE" || {
         log_message "ERROR: Failed to find files in $old_temp_dir"
@@ -1005,6 +1057,18 @@ compare_tars() {
         trap "$original_trap" EXIT
     else
         trap - EXIT
+    fi
+
+    if [ ${#crucial_deletions[@]} -gt 0 ]; then
+        log_message "ERROR: CRUCIAL files or folders have been deleted!"
+        for item in "${crucial_deletions[@]}"; do
+            log_message "ERROR: Missing crucial file: $item"
+            echo "[ERROR] Missing crucial file: $item"
+        done
+        log_message "ERROR: Aborting backup run to protect historical backups."
+        echo "[ERROR] Aborting backup run to protect historical backups."
+        rm -f "$new_tar"
+        exit 1
     fi
 
     if [ $has_changes -eq 0 ]; then
@@ -1278,6 +1342,7 @@ main() {
         log_message "ERROR: parse_rules failed."
         exit 1
     fi
+    check_crucial_configuration
     if ! build_exclude_patterns; then
         log_message "ERROR: build_exclude_patterns failed."
         exit 1
