@@ -1,6 +1,6 @@
 # Cerebro: State-Monitoring Differential Backup Engine
 
-> **Version:** v3.3  
+> **Version:** v3.4  
 > **Core Philosophy:** "Verify First, Commit Later."
 
 ## 1. Overview

@@ -1,11 +1,11 @@
 #!/bin/bash
-# Cerebro v3.3 - Custom Backup Solution
+# Cerebro v3.4 - Custom Backup Solution
 # Copyright (c) 2026 Arelius-D | MIT License
 set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0" .sh)
 SCRIPT_TITLE="Custom Backup Solution for Files and Folders"
-CODE_VERSION="v3.3"
+CODE_VERSION="v3.4"
 SCRIPT_DIR="${SCRIPT_DIR:-$(dirname "$(realpath "$0")")}"
 SCRIPT_FILE_NAME="$SCRIPT_NAME.sh"
 ASSETS_DIR="$SCRIPT_DIR/assets"
@@ -422,11 +422,14 @@ create_tar() {
     tar_cmd+=("${items[@]}")
     log_message "DEBUG: Running tar command: ${tar_cmd[*]}"
 
-    local tar_errors
-    tar_errors=$("${tar_cmd[@]}" 2>&1) || {
-        log_message "ERROR: Failed to create tar file $tar_file: $tar_errors"
+    local exit_status=0
+    tar_errors=$("${tar_cmd[@]}" 2>&1) || exit_status=$?
+    if [ $exit_status -ne 0 ] && [ $exit_status -ne 1 ]; then
+        log_message "ERROR: Failed to create tar file $tar_file (exit code $exit_status): $tar_errors"
         return 1
-    }
+    elif [ $exit_status -eq 1 ]; then
+        log_message "WARNING: tar completed with warnings (some files changed during read): $tar_errors"
+    fi
 
     if [ -f "$tar_file" ]; then
         log_message "Tar file created: $tar_file"
